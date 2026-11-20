@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# Unity's YAML serializer writes a space after empty values.
+*.asset whitespace=-blank-at-eol
+*.meta whitespace=-blank-at-eol
+*.prefab whitespace=-blank-at-eol
+*.unity whitespace=-blank-at-eol

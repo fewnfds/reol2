@@ -1,0 +1,36 @@
+# Unity generates these files and directories locally.
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Bb]uild/
+/[Bb]uilds/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+/Assets/StreamingAssets/aa.meta
+/Assets/StreamingAssets/aa/
+
+# IDE and build outputs.
+/.vs/
+/.idea/
+/.vscode/
+*.csproj
+*.sln
+*.slnx
+*.user
+*.userprefs
+*.pdb
+*.mdb
+
+# Machine-specific configuration, installed skills, and advisor outputs.
+/.local/
+/.codex/config.toml
+/.codex/config.toml.*
+/.agents/skills/unity-cli/
+/.agents/skills/new-unity-project/
+/.agents/skills/unity-pipeline/
+/.agents/skills/unity-package-management/
+.env
+.env.*
+__pycache__/
