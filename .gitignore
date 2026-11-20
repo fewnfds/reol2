@@ -15,6 +15,7 @@
 /.vs/
 /.idea/
 /.vscode/
+/.vsconfig
 *.csproj
 *.sln
 *.slnx
@@ -24,6 +25,7 @@
 *.mdb
 
 # Machine-specific configuration, installed skills, and advisor outputs.
+/ProjectSettings/PackageManager.policy
 /.local/
 /.codex/config.toml
 /.codex/config.toml.*

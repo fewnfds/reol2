@@ -15,7 +15,7 @@
 | Unity 官方 skills | 项目本机安装 `unity-cli`、`new-unity-project`、`unity-pipeline`、`unity-package-management`，授权范围见 Unity Companion License。 |
 | `reol2-voxel` | 仓库自带的体素游戏开发与验证 skill。 |
 
-官方 CLI 和 Unity MCP 可免费使用，无需 Unity AI 订阅。编辑器需要有效许可证。激活后从仓库根目录运行 `unity open .`，首次导入会生成 `Packages/packages-lock.json`。MCP 在编辑器关闭时可查询 CLI 状态和本机项目。编辑器连接以 `unity status --format json` 显示就绪为准。用 `unity command --format json` 查看当前 Pipeline 命令，然后检查 Console、Play Mode 中推进的帧和画面。能用可重复测试观察的玩法行为，优先记录到 Unity Test Framework 中。
+官方 CLI 和 Unity MCP 可免费使用，无需 Unity AI 订阅。编辑器需要有效许可证。本机已通过 Unity CLI 激活 Unity Personal，可在仓库根目录运行 `unity open .` 打开项目。`Packages/packages-lock.json` 固定首次成功导入时解析的依赖版本。Unity Personal 的离线宽限期为 30 天，重新联网后可以自动校验。MCP 在编辑器关闭时可查询 CLI 状态和本机项目。编辑器连接以 `unity status --format json` 显示就绪为准。用 `unity command --format json` 查看当前 Pipeline 命令，然后检查 Console、Play Mode 中推进的帧和画面。能用可重复测试观察的玩法行为，优先记录到 Unity Test Framework 中。
 
 在另一台机器恢复 Unity Agent 工具时，先安装 Unity CLI，然后从仓库根目录运行以下命令。`mcp configure` 会把当前项目路径写进本机的项目级 Codex 配置。Codex 会从受信任的项目加载项目级配置。在新会话中检查 `unity` 是否出现在 MCP 工具列表。
 
@@ -25,7 +25,7 @@ unity skill install codex --local --skill unity-cli,new-unity-project,unity-pipe
 unity mcp configure codex --local --project-path (Get-Location).Path
 ```
 
-- [Unity CLI 1.0](https://unity.com/the-unity-cli-1.0-is-here) · [官方 CLI 安装与用法](https://docs.unity.com/en-us/unity-cli/use-unity-cli) · [Unity MCP 接入](https://docs.unity.com/en-us/unity-cli/replace-mcp-server-unity-cli) · [Unity Skills](https://github.com/Unity-Technologies/skills)
+- [Unity CLI 1.0](https://unity.com/the-unity-cli-1.0-is-here) · [官方 CLI 安装与用法](https://docs.unity.com/en-us/unity-cli/use-unity-cli) · [Unity MCP 接入](https://docs.unity.com/en-us/unity-cli/replace-mcp-server-unity-cli) · [Unity Skills](https://github.com/Unity-Technologies/skills) · [Unity Personal 联网校验](https://support.unity.com/hc/en-us/articles/23956583533844-Named-User-licensing-NUL-FAQ)
 
 ### 开源替代方案（2026 年 11 月 20 日核验）
 
