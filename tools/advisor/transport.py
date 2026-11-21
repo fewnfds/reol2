@@ -20,10 +20,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError("Gateway redirects are disabled; check base_url.")
 
 
-def configuration(path: Path, *, provider: str = "aistudio") -> dict:
+def configuration(path: Path, *, provider: str = "aistudio", require_file: bool = False) -> dict:
     for name, default_path in PROVIDER_CONFIGS.items():
         if name != provider and path.resolve() == default_path.resolve():
             raise ValueError(f"{path.name} belongs to {name}. Use a separate config for {provider}.")
+    if require_file and not path.is_file():
+        raise FileNotFoundError(f"Advisor config file not found: {path}")
+
     web = provider == "gemini-web"
     env_prefix = "REOL_ADVISOR_WEB_" if web else "REOL_ADVISOR_"
     default_base = "http://127.0.0.1:8007/v1" if web else "http://127.0.0.1:2048/v1"

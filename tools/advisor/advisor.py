@@ -247,9 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                        "links_not_downloaded": manifest["links_not_downloaded"]}
             write_json(args.out_dir / "summary.json", summary)
             return emit(summary)
-        if explicit_config and not args.config.is_file():
-            raise FileNotFoundError(f"Advisor config file not found: {args.config}")
-        config = configuration(args.config, provider=args.provider)
+        config = configuration(args.config, provider=args.provider, require_file=explicit_config)
         timeout = args.timeout if args.timeout is not None else float(config.get("timeout_seconds", 900))
         if any(not math.isfinite(value) or value <= 0 for value in (timeout, args.wait_timeout, args.poll_interval)):
             raise ValueError("HTTP timeout, wait timeout and polling interval must be finite and positive.")
