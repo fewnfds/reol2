@@ -1,0 +1,6 @@
+{
+    "name": "Reol2.VoxelDemo.Editor",
+    "rootNamespace": "Reol2.Editor",
+    "references": ["Reol2.VoxelDemo", "Unity.InputSystem", "UnityEngine.UI"],
+    "includePlatforms": ["Editor"]
+}
