@@ -11,6 +11,6 @@
 
 ## 本机顾问
 
-复杂设计和 review 可以调用 `python -X utf8 .local/advisor/advisor.py ask --prompt "问题"`。每轮交代背景、已有证据和待决策问题。顾问返回的建议由当前执行者结合项目源码和实测取舍。发送附件时只选本轮需要的材料。
+复杂设计或需要第二意见的代码审查可以用 `python -X utf8 tools/advisor/advisor.py ask --prompt "背景、证据与待判断的问题" --attach "相关源码"`。默认并行征询 Neon High 和 Neon Task。阅读输出中的 `answers.md` 与 `summary.json`，由当前执行者核对源码和实测并作最终取舍。[快速上手](tools/advisor/README.md)
 
 本机网关配置、凭据与原始咨询记录放在 Git 忽略的 `.local/`。项目专用的 MCP 配置也留在本机。

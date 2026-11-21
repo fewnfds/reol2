@@ -34,8 +34,20 @@ unity mcp configure codex --local --project-path (Get-Location).Path
 | [IvanMurzak Unity-MCP](https://github.com/IvanMurzak/Unity-MCP/releases/tag/1.13.0) | Apache-2.0。`1.13.0` 发布于 2026 年 11 月 19 日 | 同时提供 MCP、CLI 和 skills，适合需要自行扩展或维护本地工具时。 |
 | [MCP for Unity（CoplayDev）](https://github.com/CoplayDev/unity-mcp/releases/tag/v10.3.0) | MIT。`v10.3.0` 发布于 2026 年 10 月 4 日 | 场景、Prefab、Console、Unity Test Framework 和 Blender 接入。 |
 
+## 顾问与提交验证
+
+用本机双顾问审查复杂改动。提交前以当前源码和实际测试复核意见。[顾问快速上手](../tools/advisor/README.md)
+
+GitHub Actions 在一个 Linux 作业中检查已纳入 Git 的 Unity 资产与 `.meta`、构建场景 GUID、包配置 JSON，并运行顾问的模拟网关测试。Unity Play Mode 和 Windows 构建在开发机验证。
+
+```powershell
+python -B -X utf8 tools/check_unity_files.py
+python -B -X utf8 tools/advisor/test_advisor.py
+unity test . --mode PlayMode --filter Reol2.Tests.VoxelDemoTests --output Logs/VoxelDemoPlayMode.xml
+```
+
 ## 美术与代码参考
 
-首个原型用程序生成的方块地形和颜色材质。角色和环境道具从 [Quaternius Cube World Kit](https://quaternius.com/packs/cubeworldkit.html) 起步，它提供 CC0 的带动画角色、动物与道具，有 FBX 格式。需要更细的人物基础时可看 [Universal Base Characters](https://quaternius.com/packs/universalbasecharacters.html)，少量道具可从 [Kenney Voxel Kit](https://kenney.nl/assets/voxel-kit) 选，同为 CC0。缺少特定修仙道具时，可以先做简单几何体，再视需要用 Blender 或 AI 生成静态道具。
+首个原型试用程序生成的可挖填坡面和颜色材质。低多边形角色和环境道具可参考 CC0 素材。Quaternius Cube World Kit 有带动画的角色、动物和 FBX 道具，Universal Base Characters 提供另一套人物基础，Kenney Voxel Kit 可用来挑选少量道具。缺少特定修仙道具时，可以先用简单几何体占位，再视需要用 Blender 或 AI 生成静态道具。[Cube World Kit](https://quaternius.com/packs/cubeworldkit.html) · [Universal Base Characters](https://quaternius.com/packs/universalbasecharacters.html) · [Kenney Voxel Kit](https://kenney.nl/assets/voxel-kit)
 
 体素实现可查 [HELLO_MY_WORLD](https://github.com/kojeomstudio/HELLO_MY_WORLD) 的 Unity 6 C# 分块和寻路代码。通用 C# 游戏架构可看 [Unity 游戏编程模式示例](https://github.com/Unity-Technologies/game-programming-patterns-demo)。用作参考时先核对对应代码和素材的许可。
