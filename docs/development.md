@@ -36,7 +36,7 @@ unity mcp configure codex --local --project-path (Get-Location).Path
 
 ## 顾问与提交验证
 
-用本机双顾问审查复杂改动。提交前以当前源码和实际测试复核意见。[顾问快速上手](../tools/advisor/README.md)
+用本机 Gemini Web 顾问征求独立意见，提交前以当前源码和实际测试复核。顾问配置、凭据与原始咨询记录放在 Git 忽略的 `.local/`，项目专用的 MCP 配置也留在本机。[顾问快速上手](../tools/advisor/README.md)
 
 GitHub Actions 在一个 Linux 作业中检查已纳入 Git 的 Unity 资产与 `.meta`、构建场景 GUID、包配置 JSON，并运行顾问的模拟网关测试。Unity Play Mode 和 Windows 构建在开发机验证。
 
@@ -47,6 +47,8 @@ unity test . --mode PlayMode --filter Reol2.Tests.VoxelDemoTests --output Logs/V
 ```
 
 ## 美术与代码参考
+
+大陆场景的主角使用 Quaternius 两套 CC0 Standard 资源，运行时由 Unity 内置 Animation 模块处理 Humanoid。近景雨雪用内置 Particle System 模块。当前的时钟、配色和勘探入口见[大世界视觉、自然系统与主角](roadmap/world-visual-nature-character.md)。[来源与许可](../THIRD_PARTY_NOTICES.md)
 
 首个原型试用程序生成的可挖填坡面和颜色材质。低多边形角色和环境道具可参考 CC0 素材。Quaternius Cube World Kit 有带动画的角色、动物和 FBX 道具，Universal Base Characters 提供另一套人物基础，Kenney Voxel Kit 可用来挑选少量道具。缺少特定修仙道具时，可以先用简单几何体占位，再视需要用 Blender 或 AI 生成静态道具。[Cube World Kit](https://quaternius.com/packs/cubeworldkit.html) · [Universal Base Characters](https://quaternius.com/packs/universalbasecharacters.html) · [Kenney Voxel Kit](https://kenney.nl/assets/voxel-kit)
 
