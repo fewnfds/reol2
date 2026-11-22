@@ -1,0 +1,825 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using Reol2.Voxels;
+using UnityEngine;
+using UnityEngine.Rendering;
+using Object = UnityEngine.Object;
+using Stage = Reol2.World.ContinentStreamProbe.Stage;
+
+namespace Reol2.World
+{
+    [DisallowMultipleComponent]
+    public sealed class ContinentTerrain : MonoBehaviour
+    {
+        public const int MapWidth = ContinentField.Extent * 2;
+        public const int LowestElevation = ContinentField.Bedrock;
+        private const int PoolLimit = 32;
+        private const int NearRadius = 4;
+        private const int LeadRadius = 2;
+        private const int PagesPerFrame = 72;
+        private const int SurfacesPerFrame = 3;
+        private const double BuildBudgetMs = 2.25;
+        private const float Reach = 5.5f;
+
+        [SerializeField] private Material terrainMaterial;
+        [SerializeField] private Material oceanMaterial;
+        [SerializeField] private bool largeWorld;
+        [SerializeField] private long worldSeed = 20261121;
+
+        private readonly Dictionary<Vector3Int, ResidentPage> ready = new(800);
+        private readonly Stack<ChunkView> pool = new();
+        private readonly Dictionary<Vector3Int, float> requests = new(512);
+        private readonly List<KeyValuePair<Vector3Int, float>> queue = new(512);
+        private readonly List<Vector3Int> retired = new(512);
+        private readonly HashSet<Vector2Int> changedColumns = new();
+        private readonly List<Vector3Int> changedChunks = new();
+        private readonly MarchingCubes mesher = new();
+        private readonly WorldFrame frame = new();
+        private Func<Vector3Int, Vector3, Vector3, Color32> palette;
+        private Vector4 paletteHeights;
+        private WorldMaterial.PageTint paletteTint;
+        private MineralVein? paletteVein;
+        private bool paletteEdited;
+        private ContinentField field;
+        private ContinentHorizon horizon;
+        private WorldHorizon worldHorizon;
+        private WorldCaveHorizon caveHorizon;
+        private WorldInlandWater inlandWater;
+        private Mesh ocean;
+        private Transform oceanView;
+        private MaterialPropertyBlock oceanProperties;
+        private WorldPosition oceanAt;
+        private Vector3Int oceanPhaseOrigin;
+        private static readonly int WaterOrigin = Shader.PropertyToID("_WaterOrigin");
+        private static readonly int GroundOrigin = Shader.PropertyToID("_ReolGroundOrigin");
+        private bool coverageDirty;
+        private Vector3Int center;
+        private Vector3Int lead;
+        private int next;
+        private bool scheduled;
+        private ContinentStreamProbe probe;
+        private WorldPosition? deepSea;
+
+        public bool IsLargeWorld => largeWorld;
+        public long Seed => worldSeed;
+        public Vector3 Landing => frame.ToLocal(field.Landing);
+        public WorldPosition WorldLanding => field.Landing;
+        public WorldPosition OceanEntry => field.SeaEntry;
+        public WorldPosition WestCaveEntrance => field.Caves.WestEntrance;
+        public WorldPosition EastCaveEntrance => field.Caves.EastEntrance;
+        public WorldPosition CaveChamber => field.Caves.Chamber;
+        public WorldPosition DeepChamber => field.Caves.DeepChamber;
+        internal WorldPosition BasinEntry => new(field.Surface.Center.x + WorldSurface.BasinEast, WorldSurface.LakeLevel + 24,
+            field.Surface.Center.y + WorldSurface.BasinNorth);
+        internal WorldPosition DeepSeaEntry
+        {
+            get
+            {
+                if (!deepSea.HasValue)
+                    deepSea = field.Surface.FindDeepSea();
+                return deepSea.Value;
+            }
+        }
+        internal WorldPosition MountainOverview => new(field.Surface.Center.x - 87600, WorldDefinition.MaxY - 8,
+            field.Surface.Center.y - 34000);
+        internal IReadOnlyList<WorldPosition> CavePassage => field.Caves.Passage;
+        public int ActivePages => ready.Count;
+        public int VisibleChunks { get; private set; }
+        public int PendingPages => requests.Count;
+        public int EditedSamples => field.EditedSamples;
+        public int BuiltPages { get; private set; }
+        public double LastStreamMs { get; private set; }
+        public int HorizonTiles => worldHorizon?.ResidentTiles ?? 0;
+        public int HorizonTriangles => worldHorizon?.VisibleTriangles ?? 0;
+        internal int CaveTiles => caveHorizon?.VisibleTiles ?? 0;
+        internal int HorizonLevelAt(WorldPosition point) => worldHorizon.VisibleLevelAt(point);
+        internal long EvaluatedDensitySamples => field.EvaluatedDensitySamples;
+
+        internal ContinentStreamProbe EnableStreamProbe() => probe ??= new ContinentStreamProbe();
+
+        private void Awake()
+        {
+            if (largeWorld)
+            {
+                string[] arguments = Environment.GetCommandLineArgs();
+                int seedFlag = Array.IndexOf(arguments, "-world-seed");
+                if (seedFlag >= 0 && seedFlag + 1 < arguments.Length
+                    && long.TryParse(arguments[seedFlag + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out long requested))
+                    worldSeed = requested;
+                field = new ContinentField(new WorldDefinition(worldSeed));
+                worldHorizon = new WorldHorizon(transform, field, terrainMaterial);
+                caveHorizon = new WorldCaveHorizon(transform, field, worldHorizon);
+                inlandWater = new WorldInlandWater(transform, field.Surface, oceanMaterial);
+                palette = GlobalColor;
+                frame.CenterOn(field.Landing);
+            }
+            else
+            {
+                field = new ContinentField();
+                horizon = new ContinentHorizon(transform, field, terrainMaterial);
+                palette = LegacyColor;
+            }
+            ocean = CreateOcean();
+            inlandWater?.Place(frame);
+            PlaceOcean(Landing);
+            SetGroundOrigin();
+        }
+
+        public WorldPosition ToWorld(Vector3 local) => frame.ToWorld(local);
+        public Vector3 ToLocal(WorldPosition point) => frame.ToLocal(point);
+        public float SurfaceHeight(WorldPosition point) => field.HeightAt(point.X, point.Z);
+        public float SurfaceHeight(float x, float z) => largeWorld
+            ? SurfaceHeight(frame.ToWorld(new Vector3(x, 0f, z))) - frame.Origin.y : field.HeightAt(x, z);
+        public bool IsOcean(Vector3 point) => field.InOcean(frame.ToWorld(point));
+        internal bool IsWater(Vector3 point) => field.InWater(frame.ToWorld(point));
+        internal bool IsUnderground(Vector3 point)
+        {
+            WorldPosition world = frame.ToWorld(point);
+            return world.Y + 8 < field.HeightAt(world.X, world.Z);
+        }
+        internal static float HorizonDistance(double elevation) => Mathf.Lerp(13500f, 100000f,
+            Mathf.Clamp01((float)elevation / 32768f));
+
+        internal bool NeedsShift(Vector3 local) => largeWorld && frame.NeedsShift(local);
+
+        internal bool AllowsEntry(WorldPosition point)
+        {
+            if (!largeWorld)
+                return true;
+            if (!WorldDefinition.Contains(point) || point.X < -WorldDefinition.Extent + 0.54
+                || point.X > WorldDefinition.Extent - 0.54 || point.Z < -WorldDefinition.Extent + 0.54
+                || point.Z > WorldDefinition.Extent - 0.54 || point.Y < WorldDefinition.MinY + 0.57
+                || point.Y > WorldDefinition.MaxY - 2.09)
+                return false;
+            return !field.IsSolidAt(new WorldPosition(point.X, point.Y + 0.25, point.Z))
+                && !field.IsSolidAt(new WorldPosition(point.X, point.Y + 1.38, point.Z));
+        }
+
+        internal void CenterWorld(WorldPosition point)
+        {
+            if (!largeWorld)
+                return;
+            Vector3Int previous = frame.Origin;
+            frame.CenterOn(point);
+            if (previous == frame.Origin)
+                return;
+            Vector3Int delta = frame.Origin - previous;
+            if (Math.Abs(delta.x) > 8192 || Math.Abs(delta.y) > 8192 || Math.Abs(delta.z) > 8192)
+            {
+                foreach (ResidentPage page in ready.Values)
+                    Recycle(page.View);
+                ready.Clear();
+                requests.Clear();
+                queue.Clear();
+                next = 0;
+                probe?.SetRequests(requests);
+            }
+            else
+            {
+                Vector3Int anchor = frame.PageOrigin;
+                foreach (var page in ready)
+                    page.Value.View?.Place(page.Key - anchor);
+            }
+            coverageDirty = true;
+            scheduled = false;
+            worldHorizon.Reposition(frame);
+            caveHorizon.Reposition(frame);
+            inlandWater.Place(frame);
+            PlaceOcean(frame.ToLocal(point));
+            SetGroundOrigin();
+        }
+
+        private void SetGroundOrigin() => Shader.SetGlobalVector(GroundOrigin,
+            new Vector4(frame.Origin.x / 8, frame.Origin.z / 8, frame.Origin.y / 8, 1f));
+
+        public void PrepareEntry(Vector3 point)
+        {
+            Vector3Int origin = LocalChunk(point);
+            center = origin;
+            for (int z = -1; z <= 1; z++)
+            for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++)
+            {
+                Vector3Int chunk = origin + new Vector3Int(x, y, z);
+                if (InsideWorld(chunk) && !ready.ContainsKey(chunk))
+                    Build(chunk);
+            }
+            scheduled = false;
+            UpdateHorizon(point, entry: true);
+        }
+
+        public void Stream(Vector3 position, Vector3 intendedVelocity)
+        {
+            probe?.BeginStep();
+            long start = Stopwatch.GetTimestamp();
+            Vector3 prediction = Vector3.ClampMagnitude(intendedVelocity * 0.68f, 44f);
+            float verticalLead = Mathf.Abs(prediction.y);
+            if (verticalLead > 14f)
+                prediction *= 14f / verticalLead;
+            Vector3 endpoint = ClampToWorld(position + prediction);
+            var path = new ContinentTravelPath(position, endpoint - position, frame.PageOrigin);
+            Vector3Int nextCenter = LocalChunk(position);
+            Vector3Int nextLead = LocalChunk(endpoint);
+            if (largeWorld && field.IsClearSky(frame.ToWorld(position), frame.ToWorld(endpoint), 56))
+            {
+                if (ready.Count != 0)
+                {
+                    foreach (ResidentPage page in ready.Values)
+                        Recycle(page.View, probe);
+                    ready.Clear();
+                    coverageDirty = true;
+                }
+                if (requests.Count != 0)
+                {
+                    requests.Clear();
+                    probe?.SetRequests(requests);
+                }
+                scheduled = false;
+                UpdateHorizon(position, started: start);
+                LastStreamMs = Milliseconds(start);
+                probe?.ObserveOpenPath(path);
+                return;
+            }
+            if (!scheduled || nextCenter != center || nextLead != lead)
+            {
+                center = nextCenter;
+                lead = nextLead;
+                long scheduleStart = ContinentStreamProbe.Start(probe);
+                Schedule();
+                probe?.End(Stage.Schedule, scheduleStart);
+                probe?.SetRequests(requests);
+            }
+            ServiceRequests(path, start);
+            long horizonStart = ContinentStreamProbe.Start(probe);
+            UpdateHorizon(position, started: start);
+            probe?.End(Stage.Horizon, horizonStart);
+            LastStreamMs = Milliseconds(start);
+            probe?.ObservePath(path, ready);
+        }
+
+        private void ServiceRequests(ContinentTravelPath path, long start)
+        {
+            int pages = 0;
+            int surfaces = 0;
+            // A small change within a page can move the swept controller into an adjacent page.
+            // Recheck the path without rebuilding the full queue or retiring unrelated views.
+            for (int segment = 0; segment < path.SegmentCount; segment++)
+                foreach (Vector3Int chunk in path.SegmentPages(segment).allPositionsWithin)
+                    if (BuildWithinBudget(chunk, start, ref pages, ref surfaces))
+                        return;
+
+            while (next < queue.Count)
+                if (BuildWithinBudget(queue[next++].Key, start, ref pages, ref surfaces))
+                    return;
+        }
+
+        private bool BuildWithinBudget(Vector3Int chunk, long start, ref int pages, ref int surfaces)
+        {
+            if (ready.ContainsKey(chunk) || !InsideWorld(chunk))
+                return false;
+
+            if (Build(chunk, probe))
+                surfaces++;
+            pages++;
+            return pages >= PagesPerFrame || surfaces >= SurfacesPerFrame || Milliseconds(start) >= BuildBudgetMs;
+        }
+
+        public Vector3 LimitDisplacement(Vector3 feet, Vector3 displacement)
+        {
+            Vector3 target = ClampToWorld(feet + displacement);
+            if (HasCoverage(feet, target))
+                return target - feet;
+
+            float safe = 0f;
+            float missing = 1f;
+            for (int i = 0; i < 7; i++)
+            {
+                float fraction = (safe + missing) * 0.5f;
+                if (HasCoverage(feet, Vector3.Lerp(feet, target, fraction)))
+                    safe = fraction;
+                else
+                    missing = fraction;
+            }
+            return (target - feet) * safe;
+        }
+
+        public bool HasCoverage(Vector3 fromFeet, Vector3 toFeet)
+        {
+            if (largeWorld && field.IsClearSky(frame.ToWorld(fromFeet), frame.ToWorld(toFeet), 3))
+                return true;
+            foreach (Vector3Int chunk in ContinentTravelPath.SweptPages(fromFeet, toFeet, frame.PageOrigin).allPositionsWithin)
+                if (!ready.ContainsKey(chunk) && (!largeWorld || InsideWorld(chunk)))
+                    return false;
+            return true;
+        }
+
+        private Vector3Int LocalChunk(Vector3 point) => ContinentField.ChunkAt(point) + frame.PageOrigin;
+
+        public bool Pick(Ray aim, Vector3 eye, out Vector3Int dig, out Vector3Int fill) =>
+            Pick(aim, eye, out dig, out fill, out _, out _);
+
+        internal bool Pick(Ray aim, Vector3 eye, out Vector3Int dig, out Vector3Int fill, out WorldPosition sample, out bool placed)
+        {
+            dig = fill = default;
+            sample = default;
+            placed = false;
+            if (!Physics.Raycast(aim, out RaycastHit hit, Reach + Vector3.Distance(aim.origin, eye),
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
+                || !hit.collider.transform.IsChildOf(transform))
+                return false;
+
+            Vector3 line = hit.point - eye;
+            if (line.sqrMagnitude > Reach * Reach
+                || Physics.Raycast(eye, line, Mathf.Max(0f, line.magnitude - 0.06f),
+                    Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+                return false;
+
+            sample = frame.ToWorld(hit.point + aim.direction * 0.026f);
+            dig = field.DigCellAt(sample, out placed);
+            fill = frame.ToWorld(hit.point + hit.normal * 0.4f).Cell;
+            return field.Editable(dig) || field.Editable(fill);
+        }
+
+        internal string Prospect(WorldPosition point, bool placed)
+        {
+            if (placed)
+                return "Placed earth";
+            float ground = field.HeightAt(point.X, point.Z);
+            RockLayer layer = WorldGeology.LayerAt((float)point.Y, ground);
+            ulong seed = unchecked((ulong)worldSeed);
+            Mineral exposed = WorldResources.At(point, layer, seed);
+            if (exposed != Mineral.None)
+                return $"{layer}  |  Exposed {exposed.ToString().ToLowerInvariant()}";
+
+            Vector3Int region = WorldResources.Region(point);
+            Mineral nearby = Mineral.None;
+            double closest = WorldResources.SearchRange * WorldResources.SearchRange;
+            for (int z = -1; z <= 1; z++)
+            for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++)
+            {
+                if (!WorldResources.TryVein(region + new Vector3Int(x, y, z), seed, out MineralVein vein))
+                    continue;
+                WorldPosition center = vein.Center;
+                double dx = center.X - point.X;
+                double dy = center.Y - point.Y;
+                double dz = center.Z - point.Z;
+                double distance = dx * dx + dy * dy + dz * dz;
+                if (distance >= closest)
+                    continue;
+                Mineral mineral = vein.In(WorldGeology.LayerAt((float)center.Y, field.HeightAt(center.X, center.Z)));
+                if (mineral == Mineral.None || !field.IsSolidAt(center))
+                    continue;
+                closest = distance;
+                nearby = mineral;
+            }
+            if (nearby == Mineral.None)
+                return $"{layer}  |  No nearby mineral trace";
+            string strength = closest < 35 * 35 ? "Strong" : closest < 65 * 65 ? "Moderate" : "Weak";
+            return $"{layer}  |  {strength} {nearby.ToString().ToLowerInvariant()} trace";
+        }
+
+        public bool TryEdit(Vector3Int cell, bool fill, CharacterController occupant = null)
+        {
+            if (fill && occupant != null
+                && occupant.bounds.Intersects(new Bounds((Vector3)(cell - frame.Origin) + Vector3.one * 0.5f, Vector3.one * 2f)))
+                return false;
+            if (!field.Edit(cell, fill, out BoundsInt samples))
+                return false;
+
+            changedChunks.Clear();
+            foreach (Vector3Int chunk in ContinentField.AffectedChunks(samples).allPositionsWithin)
+            {
+                if (!ready.TryGetValue(chunk, out ResidentPage page))
+                    continue;
+                if (page.View == null && (fill ? page.Content == PageContent.Solid : page.Content == PageContent.Air))
+                    continue;
+                ready[chunk] = Prepare(chunk, page.View, editing: true);
+                changedChunks.Add(chunk);
+            }
+            foreach (Vector3Int chunk in changedChunks)
+                Publish(chunk);
+            if (largeWorld)
+                UpdateCoverage(center);
+            else
+                FlushColumns();
+            return true;
+        }
+
+        private void Schedule()
+        {
+            scheduled = true;
+            retired.Clear();
+            foreach (Vector3Int chunk in ready.Keys)
+            {
+                if (!InRange(chunk, center, NearRadius + 2, 3) && !InRange(chunk, lead, LeadRadius + 2, 2))
+                    retired.Add(chunk);
+            }
+            foreach (Vector3Int chunk in retired)
+            {
+                Recycle(ready[chunk].View, probe);
+                ready.Remove(chunk);
+                MarkColumn(chunk);
+            }
+
+            requests.Clear();
+            RequestBox(center, NearRadius, 2, 0f);
+            RequestBox(lead, LeadRadius, 1, 2f);
+            queue.Clear();
+            queue.AddRange(requests);
+            queue.Sort(ComparePriority);
+            next = 0;
+        }
+
+        private void RequestBox(Vector3Int focus, int horizontal, int vertical, float penalty)
+        {
+            for (int z = -horizontal; z <= horizontal; z++)
+            for (int y = -vertical; y <= vertical; y++)
+            for (int x = -horizontal; x <= horizontal; x++)
+            {
+                Vector3Int chunk = focus + new Vector3Int(x, y, z);
+                Request(chunk, x * x + z * z + y * y * 3f + penalty);
+            }
+        }
+
+        private void Request(Vector3Int chunk, float priority)
+        {
+            if (InsideWorld(chunk) && !ready.ContainsKey(chunk)
+                && (!requests.TryGetValue(chunk, out float previous) || priority < previous))
+                requests[chunk] = priority;
+        }
+
+        private static int ComparePriority(KeyValuePair<Vector3Int, float> a, KeyValuePair<Vector3Int, float> b) =>
+            a.Value.CompareTo(b.Value);
+
+        private bool Build(Vector3Int chunk, ContinentStreamProbe metrics = null)
+        {
+            ResidentPage view = Prepare(chunk, null, metrics);
+            long publishStart = ContinentStreamProbe.Start(metrics);
+            ready.Add(chunk, view);
+            requests.Remove(chunk);
+            Publish(chunk);
+            metrics?.End(Stage.Publish, publishStart);
+            metrics?.BuildCompleted(chunk);
+            BuiltPages++;
+            bool hasSurface = ready[chunk].View != null;
+            if (metrics != null)
+            {
+                if (hasSurface)
+                    metrics.SurfacePages++;
+                else
+                    metrics.PagesWithoutSurface++;
+            }
+            return hasSurface;
+        }
+
+        private ResidentPage Prepare(Vector3Int chunk, ChunkView view, ContinentStreamProbe metrics = null, bool editing = false)
+        {
+            long sampleStart = ContinentStreamProbe.Start(metrics);
+            PageContent content = editing ? field.CopyEditedSurfaceSamples(chunk, mesher.SampleBuffer)
+                : field.CopySurfaceSamples(chunk, mesher.SampleBuffer);
+            bool hasSurface = content == PageContent.Mixed;
+            metrics?.End(Stage.Sample, sampleStart);
+            if (hasSurface)
+            {
+                long extractStart = ContinentStreamProbe.Start(metrics);
+                const int size = ContinentField.ChunkSize;
+                int x = chunk.x * size, z = chunk.z * size;
+                paletteTint = field.PrepareTint(x, z);
+                if (largeWorld)
+                {
+                    paletteHeights = new Vector4(field.HeightNode(x, z), field.HeightNode(x + size, z),
+                        field.HeightNode(x, z + size), field.HeightNode(x + size, z + size));
+                    var region = new Vector3Int(chunk.x >> 4, chunk.y >> 4, chunk.z >> 4);
+                    paletteVein = WorldResources.TryVein(region, unchecked((ulong)worldSeed), out MineralVein vein)
+                        && vein.IntersectsPage(chunk) ? vein : null;
+                    paletteEdited = paletteVein.HasValue && field.HasEdits(chunk);
+                }
+                mesher.Extract(chunk, palette);
+                metrics?.End(Stage.Extract, extractStart);
+                hasSurface = mesher.TriangleCount != 0;
+                if (!hasSurface)
+                    content = mesher.SampleBuffer[mesher.SampleBuffer.Length / 2] < 0f ? PageContent.Solid : PageContent.Air;
+            }
+            if (hasSurface && view == null)
+            {
+                long viewStart = ContinentStreamProbe.Start(metrics);
+                if (pool.TryPop(out view))
+                {
+                    if (metrics != null)
+                        metrics.ReusedViews++;
+                }
+                else
+                {
+                    view = new ChunkView(transform, largeWorld ? worldHorizon.ResidentMaterial : terrainMaterial);
+                    if (metrics != null)
+                        metrics.CreatedViews++;
+                }
+                view.Place(chunk - frame.PageOrigin);
+                VisibleChunks++;
+                metrics?.End(Stage.View, viewStart);
+            }
+            view?.Prepare(hasSurface, mesher, metrics);
+            return new ResidentPage(content, view);
+        }
+
+        private void Publish(Vector3Int chunk)
+        {
+            ResidentPage page = ready[chunk];
+            ChunkView view = page.View;
+            if (view != null)
+            {
+                if (view.HasSurface)
+                    view.Publish();
+                else
+                {
+                    Recycle(view);
+                    ready[chunk] = new ResidentPage(page.Content, null);
+                }
+            }
+            MarkColumn(chunk);
+        }
+
+        private void MarkColumn(Vector3Int chunk)
+        {
+            if (largeWorld)
+                coverageDirty = true;
+            else
+                changedColumns.Add(new Vector2Int(chunk.x, chunk.z));
+        }
+
+        private void UpdateHorizon(Vector3 local, bool entry = false, long started = 0)
+        {
+            if (!largeWorld)
+            {
+                FlushColumns();
+                return;
+            }
+            UpdateCoverage(LocalChunk(local));
+            WorldPosition world = frame.ToWorld(local);
+            double budget = entry ? 3 : Math.Max(0, 2.85 - Milliseconds(started));
+            if (world.Y < field.HeightAt(world.X, world.Z) + 40f)
+                caveHorizon.Stream(world, frame, budget);
+            else
+                caveHorizon.Deactivate();
+            budget = entry ? 3 : Math.Max(0, 2.85 - Milliseconds(started));
+            worldHorizon.Stream(world, frame, entry, budget);
+            PlaceOcean(local);
+        }
+
+        private void UpdateCoverage(Vector3Int focus)
+        {
+            if (!coverageDirty && (ready.Count == 0 || worldHorizon.CoverageCenter == focus))
+                return;
+            coverageDirty = false;
+            worldHorizon.UpdateCoverage(ready, focus, frame);
+        }
+
+        private void FlushColumns()
+        {
+            foreach (Vector2Int column in changedColumns)
+            {
+                Vector2Int band = field.SurfaceBand(column);
+                bool complete = true;
+                for (int y = band.x; y <= band.y; y++)
+                    complete &= ready.ContainsKey(new Vector3Int(column.x, y, column.y));
+                horizon.SetCovered(column, complete);
+                for (int y = band.x; y <= band.y; y++)
+                    if (ready.TryGetValue(new Vector3Int(column.x, y, column.y), out ResidentPage page))
+                        page.View?.Show(complete);
+            }
+            changedColumns.Clear();
+            horizon.Flush();
+        }
+
+        private void Recycle(ChunkView view, ContinentStreamProbe metrics = null)
+        {
+            if (view == null)
+                return;
+            VisibleChunks--;
+            if (pool.Count < PoolLimit)
+            {
+                view.Hide();
+                pool.Push(view);
+            }
+            else
+            {
+                view.Release();
+                if (metrics != null)
+                    metrics.ReleasedViews++;
+            }
+        }
+
+        private Mesh CreateOcean()
+        {
+            float e = largeWorld ? 1f : ContinentField.Extent * 3f;
+            var mesh = new Mesh { name = "Sea surface" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-e, 0f, -e), new Vector3(e, 0f, -e),
+                new Vector3(-e, 0f, e), new Vector3(e, 0f, e)
+            };
+            mesh.triangles = new[] { 0, 2, 1, 1, 2, 3 };
+            mesh.RecalculateBounds();
+            var surface = new GameObject("Ocean", typeof(MeshFilter), typeof(MeshRenderer));
+            oceanView = surface.transform;
+            oceanView.SetParent(transform, false);
+            surface.GetComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = surface.GetComponent<MeshRenderer>();
+            renderer.sharedMaterial = oceanMaterial;
+            renderer.shadowCastingMode = ShadowCastingMode.Off;
+            return mesh;
+        }
+
+        private void PlaceOcean(Vector3 focus)
+        {
+            if (!largeWorld)
+                return;
+            WorldPosition world = frame.ToWorld(focus);
+            bool shifted = oceanProperties == null || oceanPhaseOrigin != frame.Origin;
+            if (!shifted && Math.Abs(world.X - oceanAt.X) < 256 && Math.Abs(world.Z - oceanAt.Z) < 256
+                && Math.Abs(world.Y - oceanAt.Y) < 128)
+                return;
+            oceanAt = world;
+            float r = HorizonDistance(world.Y) * 1.12f;
+            float left = (float)Math.Max(-WorldDefinition.Extent - (double)frame.Origin.x, focus.x - r);
+            float right = (float)Math.Min(WorldDefinition.Extent - (double)frame.Origin.x, focus.x + r);
+            float back = (float)Math.Max(-WorldDefinition.Extent - (double)frame.Origin.z, focus.z - r);
+            float front = (float)Math.Min(WorldDefinition.Extent - (double)frame.Origin.z, focus.z + r);
+            oceanView.localPosition = new Vector3((left + right) * 0.5f, -frame.Origin.y, (back + front) * 0.5f);
+            oceanView.localScale = new Vector3((right - left) * 0.5f, 1f, (front - back) * 0.5f);
+            if (shifted)
+            {
+                oceanPhaseOrigin = frame.Origin;
+                oceanProperties ??= new MaterialPropertyBlock();
+                oceanProperties.SetVector(WaterOrigin,
+                    new Vector4(frame.Origin.x / 128, frame.Origin.z / 128, 0f, 0f));
+                oceanView.GetComponent<MeshRenderer>().SetPropertyBlock(oceanProperties);
+                inlandWater.SetRipples(oceanProperties);
+            }
+        }
+
+
+        private void OnDestroy()
+        {
+            Shader.SetGlobalVector(GroundOrigin, Vector4.zero);
+            foreach (ResidentPage page in ready.Values)
+                page.View?.Release();
+            foreach (ChunkView view in pool)
+                view.Release();
+            horizon?.Release();
+            caveHorizon?.Release();
+            inlandWater?.Release();
+            worldHorizon?.Release();
+            Destroy(ocean);
+        }
+
+        private bool InsideWorld(Vector3Int chunk) => largeWorld ? WorldDefinition.ContainsPage(chunk) :
+            chunk.x >= ContinentField.FirstColumn && chunk.x < -ContinentField.FirstColumn
+            && chunk.z >= ContinentField.FirstColumn && chunk.z < -ContinentField.FirstColumn
+            && chunk.y >= ContinentField.Bedrock / ContinentField.ChunkSize
+            && chunk.y < ContinentField.Ceiling / ContinentField.ChunkSize;
+
+        private static bool InRange(Vector3Int chunk, Vector3Int origin, int horizontal, int vertical) =>
+            Mathf.Abs(chunk.x - origin.x) <= horizontal && Mathf.Abs(chunk.z - origin.z) <= horizontal
+            && Mathf.Abs(chunk.y - origin.y) <= vertical;
+
+        private Vector3 ClampToWorld(Vector3 point)
+        {
+            if (largeWorld)
+            {
+                Vector3Int origin = frame.Origin;
+                point.x = Mathf.Clamp(point.x, (-WorldDefinition.Extent - origin.x) + 0.55f, (WorldDefinition.Extent - origin.x) - 0.55f);
+                point.y = Mathf.Clamp(point.y, (WorldDefinition.MinY - origin.y) + 0.65f, (WorldDefinition.MaxY - origin.y) - 2.1f);
+                point.z = Mathf.Clamp(point.z, (-WorldDefinition.Extent - origin.z) + 0.55f, (WorldDefinition.Extent - origin.z) - 0.55f);
+                return point;
+            }
+            const float edge = ContinentField.Extent - 2f;
+            point.x = Mathf.Clamp(point.x, -edge, edge);
+            point.y = Mathf.Clamp(point.y, ContinentField.Bedrock + 0.65f, ContinentField.Ceiling - 2.1f);
+            point.z = Mathf.Clamp(point.z, -edge, edge);
+            return point;
+        }
+
+        private static double Milliseconds(long start) => (Stopwatch.GetTimestamp() - start) * (1000d / Stopwatch.Frequency);
+
+        private Color32 LegacyColor(Vector3Int chunk, Vector3 local, Vector3 normal)
+        {
+            float height = chunk.y * ContinentField.ChunkSize + local.y;
+            return WorldMaterial.ColorAt(height, normal, height, ContinentField.Spacing, paletteTint.ShadeAt(local), false);
+        }
+
+        private Color32 GlobalColor(Vector3Int chunk, Vector3 local, Vector3 normal)
+        {
+            const int size = ContinentField.ChunkSize;
+            float ground = WorldSurface.Interpolate(paletteHeights.x, paletteHeights.y, paletteHeights.z, paletteHeights.w,
+                local.x / size, local.z / size);
+            float height = chunk.y * size + local.y;
+            Color32 color = WorldMaterial.ColorAt(height, normal, ground, ContinentField.Spacing, paletteTint.ShadeAt(local), true);
+            if (paletteVein is not MineralVein vein)
+                return color;
+            var point = new WorldPosition(chunk.x * (double)size + local.x, height, chunk.z * (double)size + local.z);
+            if (!vein.Contains(point))
+                return color;
+            Mineral mineral = vein.In(WorldGeology.LayerAt(height, ground));
+            if (mineral == Mineral.None)
+                return color;
+            if (paletteEdited)
+            {
+                var inside = new WorldPosition(point.X - normal.x * 0.05, point.Y - normal.y * 0.05,
+                    point.Z - normal.z * 0.05);
+                field.DigCellAt(inside, out bool placed);
+                if (placed)
+                    return color;
+            }
+            return WorldMaterial.OreTint(color, mineral);
+        }
+
+        private readonly struct ResidentPage
+        {
+            internal readonly PageContent Content;
+            internal readonly ChunkView View;
+
+            internal ResidentPage(PageContent content, ChunkView view)
+            {
+                Content = content;
+                View = view;
+            }
+        }
+
+        private sealed class ChunkView
+        {
+            private readonly GameObject root;
+            private readonly MeshFilter filter;
+            private readonly MeshRenderer renderer;
+            private readonly MeshCollider collider;
+            private Mesh displayed;
+            private Mesh pending;
+
+            internal bool HasSurface { get; private set; }
+
+            internal ChunkView(Transform parent, Material material)
+            {
+                root = new GameObject("Resident terrain", typeof(MeshFilter), typeof(MeshRenderer), typeof(MeshCollider));
+                root.transform.SetParent(parent, false);
+                filter = root.GetComponent<MeshFilter>();
+                renderer = root.GetComponent<MeshRenderer>();
+                collider = root.GetComponent<MeshCollider>();
+                renderer.sharedMaterial = material;
+                displayed = CreateMesh();
+                pending = CreateMesh();
+            }
+
+            internal void Place(Vector3Int chunk) => root.transform.localPosition = (Vector3)chunk * ContinentField.ChunkSize;
+
+            internal void Prepare(bool hasSurface, MarchingCubes mesher, ContinentStreamProbe probe)
+            {
+                HasSurface = hasSurface;
+                if (hasSurface)
+                {
+                    long start = ContinentStreamProbe.Start(probe);
+                    mesher.Upload(pending);
+                    probe?.End(Stage.Upload, start);
+                    start = ContinentStreamProbe.Start(probe);
+                    Physics.BakeMesh(pending.GetEntityId(), convex: false, collider.cookingOptions);
+                    probe?.End(Stage.Bake, start);
+                }
+            }
+
+            internal void Publish()
+            {
+                collider.sharedMesh = pending;
+                filter.sharedMesh = pending;
+                (displayed, pending) = (pending, displayed);
+                renderer.enabled = true;
+                root.SetActive(true);
+            }
+
+            internal void Show(bool visible) => renderer.enabled = visible;
+
+            internal void Hide()
+            {
+                root.SetActive(false);
+                collider.sharedMesh = null;
+                filter.sharedMesh = null;
+            }
+
+            internal void Release()
+            {
+                Hide();
+                Object.Destroy(root);
+                Object.Destroy(displayed);
+                Object.Destroy(pending);
+            }
+
+            private static Mesh CreateMesh()
+            {
+                var mesh = new Mesh { name = "Continent surface", indexFormat = IndexFormat.UInt16 };
+                mesh.MarkDynamic();
+                return mesh;
+            }
+        }
+    }
+}

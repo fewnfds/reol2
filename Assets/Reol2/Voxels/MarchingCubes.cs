@@ -25,10 +25,16 @@ namespace Reol2.Voxels
         private readonly List<int> triangles = new(8192);
 
         internal int TriangleCount => triangles.Count / 3;
+        internal float[] SampleBuffer => values;
 
         internal void Extract(DensityVolume volume, Vector3Int chunk)
         {
             volume.CopyChunkSamples(chunk, values);
+            Extract(chunk, DemoSurfaceColor);
+        }
+
+        internal void Extract(Vector3Int chunk, Func<Vector3Int, Vector3, Vector3, Color32> surfaceColor)
+        {
             Array.Fill(vertexForEdge, -1);
             vertices.Clear();
             normals.Clear();
@@ -58,7 +64,7 @@ namespace Reol2.Voxels
                         {
                             int b = sample + CornerOffsets[to];
                             var start = new Vector3(x + (from & 1), y + ((from >> 1) & 1), z + (from >> 2));
-                            vertex = AddVertex(a, b, axis, start, chunk);
+                            vertex = AddVertex(a, b, axis, start, chunk, surfaceColor);
                             vertexForEdge[slot] = vertex;
                         }
 
@@ -101,13 +107,23 @@ namespace Reol2.Voxels
                                values[sample + Slice] - values[sample - Slice]);
         }
 
-        private int AddVertex(int a, int b, int axis, Vector3 gridPosition, Vector3Int chunk)
+        private int AddVertex(int a, int b, int axis, Vector3 gridPosition, Vector3Int chunk,
+                              Func<Vector3Int, Vector3, Vector3, Color32> surfaceColor)
         {
             float t = values[a] / (values[a] - values[b]);
             gridPosition[axis] += t;
             Vector3 position = gridPosition * Spacing;
             Vector3 normal = Vector3.LerpUnclamped(Gradient(a), Gradient(b), t).normalized;
-            Vector3 world = position + (Vector3)chunk * DensityVolume.ChunkSize;
+            int result = vertices.Count;
+            vertices.Add(position);
+            normals.Add(normal);
+            colors.Add(surfaceColor(chunk, position, normal));
+            return result;
+        }
+
+        private static Color32 DemoSurfaceColor(Vector3Int chunk, Vector3 local, Vector3 normal)
+        {
+            Vector3 world = local + (Vector3)chunk * DensityVolume.ChunkSize;
             float grass = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.43f, 0.86f, normal.y));
             grass *= Mathf.SmoothStep(0f, 1f, (world.y - 0.55f) * 1.5f);
             float rockBand = Mathf.Sin(world.y * 1.9f + world.z * 0.37f) * 0.5f + 0.5f;
@@ -115,11 +131,7 @@ namespace Reol2.Voxels
             float canopy = Mathf.Sin(world.x * 0.49f + world.z * 0.7f) * 0.5f + 0.5f;
             Color cover = Color.Lerp(new Color(0.22f, 0.40f, 0.29f), new Color(0.45f, 0.55f, 0.30f), canopy);
 
-            int result = vertices.Count;
-            vertices.Add(position);
-            normals.Add(normal);
-            colors.Add(Color.Lerp(rock, cover, grass));
-            return result;
+            return Color.Lerp(rock, cover, grass);
         }
     }
 }
