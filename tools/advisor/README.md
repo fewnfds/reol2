@@ -1,41 +1,36 @@
 # 本机顾问
 
-## 三步发起咨询
+在仓库根目录运行。每次咨询都是独立问答，默认经 Gemini Web2API 把同一份输入并行发给 `gemini-4-neon`（High）和 `gemini-4-neon-task`，各一次。两路均没有完整答复时，用同一份输入经 AI Studio 并行调用两路 `gemini-4-neon-search`，温度为 1.0 和 1.2。每轮都要交代背景，后续复审可把前一轮有价值的意见和新证据写进新提示词。
 
-1. 在 Reol 2 项目根目录运行 `python -X utf8 tools/advisor/advisor.py models`，确认本机网关列出 `gemini-4-neon` 和 `gemini-4-neon-task`。新机器先按下方配置网关。
-2. 一次说清项目阶段、当前实现、实测证据和要判断的问题。每个相关文件写一次 `--attach`。长题目可以写进 UTF-8 文件，再用 `--prompt-file`。
-3. 打开命令返回的 `answers.md`，再看 `summary.json` 中每个模型的状态和耗时。`partial` 表示只收到部分顾问的完整结果。把顾问意见当成审查线索。当前执行者应对照源码、API 文档和实际测试复核，再决定采纳、搁置或拒绝哪些建议。
+双模型并行只用于 `ask`。两位顾问可以读取多模态附件，交付的是文字意见。生图、朗读、配乐和视频使用 `generate`，每次选择一个支持该用途的模型或服务，只提交一次生成请求。[媒体快捷命令](gemini-web-api.md#媒体快捷命令)
 
-```powershell
-python -X utf8 tools/advisor/advisor.py ask --prompt "Reol 2 是 Unity 6.3 的第三人称可挖填 Demo。两块地形共享密度采样，挖填同步发布画面和碰撞。请找玩家能触发的边界编辑缺陷，给出代码位置、证据、复现和最小验证。" --attach Assets/Reol2/Demo/VoxelDemoTerrain.cs --attach Assets/Reol2/Voxels/DensityVolume.cs
-```
+## 快速上手
 
-UTF-8 源码和文本会以原文和路径标记并入同一份提示词。范围可覆盖几个相关文件和测量结果，足以让顾问从零理解问题。图片、PDF、音频和视频使用相应的内容段。附件是待审资料。发送前确认文件属于本轮需要的上下文。
+~~~powershell
+python -B -X utf8 tools/advisor/advisor.py models
+python -B -X utf8 tools/advisor/advisor.py ask --prompt "Reol 2 用 Unity 6.3，近处页提供可挖地形与碰撞。请根据源码比较两种减少冷区流送卡顿的办法，指出最可能失效的输入、可复现实验和应记录的指标。" --attach Assets/Reol2/World/ContinentTerrain.cs
+~~~
 
-请顾问标明每项意见的代码依据、成立条件和验证办法。它只看到本轮材料，可能漏掉跨文件约束、给出片面的取舍或误判 Unity API。面向提交的审查优先处理在当前玩家入口可复现的问题。把其他意见列为待验证的假设。
+1. **把问题写成独立任务。** 交代玩家遇到的现象、项目版本、现有做法、已经量到的结果、当前约束和要做的取舍。要求顾问标注代码位置、一手资料和最小复现。长问题用 UTF-8 的 `--prompt-file .local/advisor/question.md`，短问题用 `--prompt`，两者选一。
+2. **给足证据。** 重复 `--attach` 附上源码、配置样例、日志或截图。UTF-8 源码和文本会带文件名拼进提示词。图片、PDF、音频、视频以相应内容段传送，也可附图片、视频或 YouTube 的 URL。需要在多轮重用同一份资料时，先上传，再用可重复的 `--file-id` 引用。只提供与问题有关且可发送到 Gemini Web 的内容，凭据留在本机。[文件上传与多模态](gemini-web-api.md#文件与附件)
+3. **读结果并自己核实。** 打开输出目录的 `answers.md`，再从 `summary.json` 的 `results` 看每个模型的状态和耗时。顾问只看到了这一轮给的材料，事实、Unity API、网页引用和性能判断都用当前源码与实测复核。对两份结果有争议的点，可以附上新证据请它们各自反驳或复审。
 
-## 模型与结果
+复杂代码提交可参考这个提示结构。
 
-- Web 默认并行调用 `gemini-4-neon` 和 `gemini-4-neon-task`。普通 Neon 显式使用 `reasoning_effort: high`。Task 用网关提供的档位，由网关等待云端完成并返回正文。两路使用同一份问题和附件。Web 的采样温度由网页端决定。[Web2API 协议](https://github.com/Mag1cFall/Gemini-Web2API/blob/4b251f7fc46f3a1af9cd5f80528705fff7b0ee01/docs/protocol.md#思考与签名)
-- `ask --provider aistudio` 并行调用两份 `gemini-4-neon-search`，温度分别为 `1.0`、`1.2`，思考强度为 `high`。`models --provider aistudio` 可查看该渠道的目录。
-- 单独复核一个模型用 `ask --model gemini-4-neon-task`。可重复 `--model` 指定多个 Web 模型。普通 Neon 也接受上游的档位后缀，例如 `--model 'gemini-4-neon@think=low'`。
-- 默认输出在 `.local/advisor/runs/`，可用 `--out-dir` 指定一个新目录。`prompt.md` 和每路子目录的请求、响应供复核。`--print-answer` 会显示合并的正文。`--dry-run` 只生成本地请求。HTTP 超时可用 `--timeout` 设置，默认 900 秒。
+~~~text
+背景和目标：玩家正在做什么，如何判断结果正确。
+当前事实：版本、相关入口、最小复现、日志和性能数字。
+已知取舍：哪些接口或行为要保护，哪些方案可以改。
+请回答：优先列真实缺陷或备选方案，给出适用条件、反例、验证步骤和一手出处。
+~~~
 
-## 本机配置
+## 配置与结果
 
-工具使用 Python 3.10 或更新版本。配置文件放在 Git 忽略的 `.local/advisor/`。在 `gemini-web.local.json` 中设置以下 JSON，把占位符替换为网关的 `PROXY_API_KEY`。如果网关允许无密钥调用，`api_key` 可省略。
+- 默认 OpenAI 兼容 Base URL 是 `http://127.0.0.1:8007/v1`。如网关配置了密钥，在 Git 忽略的 `.local/advisor/gemini-web.local.json` 填 `base_url`、`api_key`，也可选填 `timeout_seconds`。使用 `--config <文件>` 可以显式选用另一份 Gemini Web 配置。环境变量 `REOL_ADVISOR_WEB_BASE_URL` 和 `REOL_ADVISOR_WEB_API_KEY` 优先于文件。
 
-```json
-{
-  "base_url": "http://127.0.0.1:8007/v1",
-  "api_key": "<本机 Gemini Web 代理密钥>"
-}
-```
+- AI Studio 默认用 `http://127.0.0.1:2048/v1`，读取 `.local/advisor/config.local.json` 或环境变量 `REOL_ADVISOR_BASE_URL` 和 `REOL_ADVISOR_API_KEY`。`ask --provider aistudio` 直接走备用双路，`ask --provider gemini-web` 固定走 Web。显式指定配置、模型或 Web 文件 ID 的咨询保留指定路由。媒体生成及视频续查使用 Gemini Web。
+- 默认超时为每次 HTTP 请求 900 秒，可用 `--timeout` 调整。新任务默认存到 `.local/advisor/runs/`。用 `--out-dir` 指定一个尚不存在的目录，用 `--dry-run` 预览两份实际将发送的 JSON，用 `--print-answer` 同时打印合并正文。运行目录含原始输入、附件数据、回复和逐路状态。
+- `complete` 表示请求的答复都完整，`partial` 表示至少一份可用，`failed` 表示没有完整答复。部分成功仍返回退出码 0，依赖双审的流程要检查 `summary.json`。遇到截断、空答或未执行的工具调用，先查看单路 `run.json` 和原始 `response.json`。用 `ask --model <模型 ID>` 可单独重跑指定模型。
+- 回退时 `summary.json` 记录 `fallback_from`，四路请求和答复仍可逐个查阅。若所需的顾问答复依旧不可用，查看 `models`、各路 HTTP 状态和错误摘要，再向用户说明现有结果并询问能否恢复相应账号。
 
-也可使用 `REOL_ADVISOR_WEB_BASE_URL` 和 `REOL_ADVISOR_WEB_API_KEY` 覆盖。AI Studio 使用 `.local/advisor/config.local.json`，默认地址为 `http://127.0.0.1:2048/v1`，环境变量为 `REOL_ADVISOR_BASE_URL` 和 `REOL_ADVISOR_API_KEY`。两份配置可分别设置 `timeout_seconds`。`--config <文件>` 单独使用时选择 AI Studio，为 Web 自定义配置时同时传入 `--provider gemini-web`。
-
-## 媒体与原始请求
-
-`generate image|speech|music|video` 的生成预设走 AI Studio，用 `generate --help` 查看参数。视频任务可通过 `resume <输出目录>` 接着查询。`send --request-file` 可发手写的非流式 JSON 请求，指定 `--provider gemini-web` 可调用 Web 网关的其他接口。Web 视频的 `resume` 也须指定该渠道。`extract --response-file` 从已保存的响应提取媒体。
-
-`python -B -X utf8 tools/advisor/test_advisor.py` 在本机模拟网关上验证路由、附件、记录和媒体处理。
+更多用法见 [Gemini-Web2API 接口指南](gemini-web-api.md)。本地模拟网关测试用 `python -B -X utf8 tools/advisor/test_advisor.py`。

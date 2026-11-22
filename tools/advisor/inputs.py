@@ -8,7 +8,7 @@ import mimetypes
 from pathlib import Path
 import urllib.parse
 
-from transport import PROVIDER_CONFIGS, ROOT
+from transport import PROVIDER, ROOT, STUDIO_PROVIDER, PROVIDER_CONFIGS
 
 MIME_OVERRIDES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
                   ".ogg": "audio/ogg", ".opus": "audio/opus", ".webm": "video/webm"}
@@ -61,15 +61,33 @@ def prepare_inputs(args) -> dict:
             item["mime_type"] = "text/plain"
         attachments.append(item)
     prompt = "\n".join([prompt, *references])
-    chat, native = [{"type": "text", "text": prompt}], [{"text": prompt}]
+    native = [{"text": prompt}]
     for item in media:
-        label = "Reference attachment: " + item["name"]
-        chat.append({"type": "text", "text": label})
-        native.append({"text": label})
+        native.append({"text": "Reference attachment: " + item["name"]})
+        if "data" in item:
+            native.append({"inlineData": {"mimeType": item["mime"], "data": item["data"]}})
+        else:
+            native.append({"fileData": {"mimeType": item["mime"], "fileUri": item["url"]}})
+    file_ids = [file_id.strip() for file_id in getattr(args, "file_id", ())]
+    if not all(file_ids):
+        raise ValueError("--file-id requires a Gemini Web file ID.")
+    attachments.extend({"file_id": file_id} for file_id in file_ids)
+    prepared = {"prompt": prompt, "native_parts": native, "media_inputs": media, "attachments": attachments,
+                "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "file_ids": file_ids}
+    return consultation_input(prepared, getattr(args, "provider", PROVIDER))
+
+
+def consultation_input(prepared: dict, provider: str) -> dict:
+    prompt = prepared["prompt"]
+    media = prepared["media_inputs"]
+    file_ids = prepared["file_ids"]
+    chat = [{"type": "text", "text": prompt}]
+    for item in media:
+        chat.append({"type": "text", "text": "Reference attachment: " + item["name"]})
         mime = item["mime"]
         if mime.startswith("image/"):
             chat.append({"type": "image_url", "image_url": {"url": item["url"]}})
-        elif mime.startswith("video/") and args.provider == "aistudio":
+        elif provider == STUDIO_PROVIDER and mime.startswith("video/"):
             chat.append({"type": "video_url", "video_url": {"url": item["url"]}})
         elif mime.startswith("audio/"):
             fmt = {".mp3": "mp3", ".m4a": "m4a"}.get(item["suffix"], item["suffix"].lstrip("."))
@@ -78,12 +96,8 @@ def prepare_inputs(args) -> dict:
             chat.append({"type": "file", "file": {"filename": item["name"], "file_data": item["url"]}})
         else:
             chat.append({"type": "file", "file": {"file_url": item["url"]}})
-        if "data" in item:
-            native.append({"inlineData": {"mimeType": mime, "data": item["data"]}})
-        else:
-            native.append({"fileData": {"mimeType": mime, "fileUri": item["url"]}})
-    content = chat if media else prompt
-    return {"prompt": prompt, "chat_content": content, "native_parts": native,
-            "media_inputs": media, "attachments": attachments,
-            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+    for file_id in file_ids:
+        chat.append({"type": "file", "file": {"file_id": file_id}})
+    content = chat if media or file_ids else prompt
+    return {**prepared, "chat_content": content,
             "input_sha256": hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode()).hexdigest()}

@@ -10,9 +10,11 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 LOCAL_DIR = ROOT / ".local" / "advisor"
-DEFAULT_CONFIG = LOCAL_DIR / "config.local.json"
 WEB_CONFIG = LOCAL_DIR / "gemini-web.local.json"
-PROVIDER_CONFIGS = {"aistudio": DEFAULT_CONFIG, "gemini-web": WEB_CONFIG}
+STUDIO_CONFIG = LOCAL_DIR / "config.local.json"
+PROVIDER = "gemini-web"
+STUDIO_PROVIDER = "aistudio"
+PROVIDER_CONFIGS = {PROVIDER: WEB_CONFIG, STUDIO_PROVIDER: STUDIO_CONFIG}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -20,16 +22,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError("Gateway redirects are disabled; check base_url.")
 
 
-def configuration(path: Path, *, provider: str = "aistudio", require_file: bool = False) -> dict:
+def configuration(path: Path, *, provider: str = PROVIDER, require_file: bool = False) -> dict:
     for name, default_path in PROVIDER_CONFIGS.items():
         if name != provider and path.resolve() == default_path.resolve():
             raise ValueError(f"{path.name} belongs to {name}. Use a separate config for {provider}.")
     if require_file and not path.is_file():
         raise FileNotFoundError(f"Advisor config file not found: {path}")
 
-    web = provider == "gemini-web"
-    env_prefix = "REOL_ADVISOR_WEB_" if web else "REOL_ADVISOR_"
-    default_base = "http://127.0.0.1:8007/v1" if web else "http://127.0.0.1:2048/v1"
+    studio = provider == STUDIO_PROVIDER
+    env_prefix = "REOL_ADVISOR_" if studio else "REOL_ADVISOR_WEB_"
+    default_base = "http://127.0.0.1:2048/v1" if studio else "http://127.0.0.1:8007/v1"
     config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     if not isinstance(config, dict):
         raise ValueError("Advisor configuration must be a JSON object.")
@@ -43,7 +45,7 @@ def configuration(path: Path, *, provider: str = "aistudio", require_file: bool 
         raise ValueError("Put credentials in api_key, not in the URL.")
     if not isinstance(config["api_key"], str):
         raise ValueError("api_key must be a string.")
-    if not web and not config["api_key"]:
+    if studio and not config["api_key"]:
         raise ValueError(f"Set api_key in {path.name} or {env_prefix}API_KEY.")
     config["base_url"] = base
     config["provider"] = provider

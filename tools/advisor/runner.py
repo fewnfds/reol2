@@ -9,7 +9,7 @@ import time
 import urllib.parse
 
 from media import extension, save_binary, save_media
-from transport import exchange, redact, write_json
+from transport import PROVIDER, exchange, redact, write_json
 
 HERE = Path(__file__).resolve().parent
 SUCCESS = {"complete", "received", "prepared"}
@@ -51,6 +51,7 @@ def fetch_media(config: dict, url: str, timeout: float):
 def details(response: dict, manifest: dict) -> dict:
     text, citations, reasons, calls = [], [], [], 0
     has_generation = "choices" in response or "candidates" in response
+    has_image_data = "data" in response and response.get("object") != "list"
     for choice in response.get("choices") or []:
         message = choice.get("message") or {}
         text.append(answer_text(message))
@@ -68,7 +69,7 @@ def details(response: dict, manifest: dict) -> dict:
         if candidate.get("citationMetadata"):
             citations.append({"citationMetadata": candidate["citationMetadata"]})
     answer = "\n".join(text)
-    status = "complete" if has_generation or "data" in response else "received"
+    status = "complete" if has_generation or has_image_data else "received"
     if response.get("status") in PENDING or ("done" in response and not response["done"]):
         status = "remote_task_pending"
     elif response.get("status") in ("failed", "cancelled", "canceled", "expired") or response.get("error"):
@@ -80,7 +81,7 @@ def details(response: dict, manifest: dict) -> dict:
     elif (has_generation and (not reasons or any(reason not in ("stop", "STOP") for reason in reasons))
           or response.get("promptFeedback", {}).get("blockReason")):
         status = "incomplete"
-    elif (has_generation or "data" in response) and not answer.strip() and not manifest["assets"]:
+    elif (has_generation or has_image_data) and not answer.strip() and not manifest["assets"]:
         status = "empty_answer"
     if manifest["errors"] and status in SUCCESS:
         status = "media_error"
@@ -188,7 +189,7 @@ def execute(config: dict, endpoint: str, payload: dict | None, output: Path,
     output.mkdir(parents=True, exist_ok=False)
     state = {"started_utc": timestamp(), "endpoint": endpoint,
              "method": "GET" if payload is None else "POST", "status": "prepared", "automatic_retries": 0,
-             "provider": config.get("provider", "aistudio")}
+             "provider": config["provider"]}
     if payload is not None:
         write_json(output / "request.json", payload)
         if payload.get("model"):
@@ -242,9 +243,8 @@ def execute(config: dict, endpoint: str, payload: dict | None, output: Path,
 
 def resume_video(output: Path, config: dict, timeout: float, wait_timeout: float, poll_interval: float) -> dict:
     state = json.loads((output / "run.json").read_text(encoding="utf-8-sig"))
-    provider = state.get("provider", "aistudio")
-    if config.get("provider", "aistudio") != provider:
-        raise ValueError(f"Use --provider {provider} to resume this video job.")
+    if state.get("provider") != PROVIDER:
+        raise ValueError("Only video jobs created through Gemini Web can be resumed.")
     if state.get("status") in SUCCESS and not state.get("resume_available"):
         return summarize(output, state)
     if not state.get("pending_endpoint", "").startswith("/v1/videos/"):
