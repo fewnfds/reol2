@@ -33,3 +33,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## SplitMix64 mixing function (2015)
+
+`WorldNoise.Hash` uses the mixing constants and shift sequence from Sebastiano Vigna's public-domain SplitMix64 reference. Reol 2 supplies its own integer coordinate and seed inputs. [Reference and permission notice](https://prng.di.unimi.it/splitmix64.c)
+
+## Quaternius Universal Base Characters (Standard)
+
+Downloaded 2026-11-22 from the author's free Standard release, upload 15861669. CC0 1.0 Universal. The project uses `Superhero_Male_FullBody.fbx`, `T_Superhero_Male_Dark.png`, and `T_Eye_Brown.png` under `Assets/Reol2/Characters/ThirdParty/Quaternius`. The Explorer prefab uses the original skeleton and a project-authored costume palette baked into a copy of the body mesh. Archive SHA-256 `fdbf1804c90dfc1ea03e992bff7da2dfd1a79318e13270a660180f9308455f40`. [Author's pack](https://quaternius.com/packs/universalbasecharacters.html) · [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/)
+
+## Quaternius Universal Animation Library (Standard)
+
+Downloaded 2026-11-22 from the author's free Standard release, upload 17958403. CC0 1.0 Universal. The project uses 12 selected in-place clips from `UAL1_Standard.fbx` under the same directory. Archive SHA-256 `cc73fc4e495b82958207316596317a3f40b9fa38065bde1027937452da537724`. Both packs' supplied license files are included alongside the assets. [Author's pack](https://quaternius.com/packs/universalanimationlibrary.html) · [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/)

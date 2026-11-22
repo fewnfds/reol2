@@ -8,6 +8,12 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/VoxelDemo.unity
     guid: e4a9d871377455743baea0fbcbdd590f
+  - enabled: 1
+    path: Assets/Scenes/ContinentDemo.unity
+    guid: 629bf22679914a94c949ff6d2e5241de
+  - enabled: 1
+    path: Assets/Scenes/LargeWorld.unity
+    guid: 57015834d30450b4e8a1a94266ba1873
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
   m_UseUCBPForAssetBundles: 0
