@@ -47,12 +47,7 @@ namespace Reol2.World
         private WorldHorizon worldHorizon;
         private WorldCaveHorizon caveHorizon;
         private WorldInlandWater inlandWater;
-        private Mesh ocean;
-        private Transform oceanView;
-        private MaterialPropertyBlock oceanProperties;
-        private WorldPosition oceanAt;
-        private Vector3Int oceanPhaseOrigin;
-        private static readonly int WaterOrigin = Shader.PropertyToID("_WaterOrigin");
+        private OceanSurface ocean;
         private static readonly int GroundOrigin = Shader.PropertyToID("_ReolGroundOrigin");
         private bool coverageDirty;
         private Vector3Int center;
@@ -71,8 +66,11 @@ namespace Reol2.World
         public WorldPosition EastCaveEntrance => field.Caves.EastEntrance;
         public WorldPosition CaveChamber => field.Caves.Chamber;
         public WorldPosition DeepChamber => field.Caves.DeepChamber;
-        internal WorldPosition BasinEntry => new(field.Surface.Center.x + WorldSurface.BasinEast, WorldSurface.LakeLevel + 24,
-            field.Surface.Center.y + WorldSurface.BasinNorth);
+        internal RegionalLandforms Landforms => field.Surface?.Landforms;
+        internal WorldPosition BasinEntry => Landforms is RegionalLandforms region
+            ? field.Surface.Place(region.Basin, region.LakeLevel + 110)
+            : new WorldPosition(field.Surface.Center.x + WorldSurface.BasinEast, WorldSurface.LakeLevel + 24,
+                field.Surface.Center.y + WorldSurface.BasinNorth);
         internal WorldPosition DeepSeaEntry
         {
             get
@@ -82,8 +80,10 @@ namespace Reol2.World
                 return deepSea.Value;
             }
         }
-        internal WorldPosition MountainOverview => new(field.Surface.Center.x - 87600, WorldDefinition.MaxY - 8,
-            field.Surface.Center.y - 34000);
+        internal WorldPosition MountainOverview => Landforms is RegionalLandforms region
+            ? field.Surface.Place(new System.Numerics.Vector2(-region.Size * 0.38f, -region.Size * 0.38f),
+                Math.Min(WorldDefinition.MaxY - 8d, region.Size * 0.21d + region.HeightAt(region.Peak)))
+            : new WorldPosition(field.Surface.Center.x - 87600, WorldDefinition.MaxY - 8, field.Surface.Center.y - 34000);
         internal IReadOnlyList<WorldPosition> CavePassage => field.Caves.Passage;
         public int ActivePages => ready.Count;
         public int VisibleChunks { get; private set; }
@@ -92,55 +92,124 @@ namespace Reol2.World
         public int BuiltPages { get; private set; }
         public double LastStreamMs { get; private set; }
         public int HorizonTiles => worldHorizon?.ResidentTiles ?? 0;
+        internal int PendingHorizonTiles => worldHorizon?.PendingTiles ?? 0;
+        internal (int Tiles, int Cells, int Longest) RegionalHorizonBuilds => worldHorizon == null ? default
+            : (worldHorizon.RegionalTilesBuilt, worldHorizon.RegionalCellVisits, worldHorizon.LongestRegionalTileBuild);
         public int HorizonTriangles => worldHorizon?.VisibleTriangles ?? 0;
         internal int CaveTiles => caveHorizon?.VisibleTiles ?? 0;
         internal int HorizonLevelAt(WorldPosition point) => worldHorizon.VisibleLevelAt(point);
         internal long EvaluatedDensitySamples => field.EvaluatedDensitySamples;
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
+        internal Vector3Int FrameOrigin => frame.Origin;
+        internal WorldRenderReport.TileState[] RenderReportTiles() => worldHorizon.ReportVisibleTiles(frame);
+        internal int RenderReportInlandWaterTriangles => worldHorizon?.SharedInlandWaterTriangles ?? 0;
+        internal int RenderReportSeaTriangles => ocean.TriangleCount - RenderReportInlandWaterTriangles;
+        internal int LastEditPublishedPages => changedChunks.Count;
+#endif
+
         internal ContinentStreamProbe EnableStreamProbe() => probe ??= new ContinentStreamProbe();
+
+        internal float ViewDistanceOverride { get; private set; }
 
         private void Awake()
         {
+            ocean = new OceanSurface(transform, oceanMaterial);
             if (largeWorld)
             {
                 string[] arguments = Environment.GetCommandLineArgs();
+                IWorldSurfaceData surfaceData = null;
                 int seedFlag = Array.IndexOf(arguments, "-world-seed");
                 if (seedFlag >= 0 && seedFlag + 1 < arguments.Length
                     && long.TryParse(arguments[seedFlag + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out long requested))
                     worldSeed = requested;
-                field = new ContinentField(new WorldDefinition(worldSeed));
-                worldHorizon = new WorldHorizon(transform, field, terrainMaterial);
+                var world = new WorldDefinition(worldSeed);
+                RegionalLandforms landforms = null;
+                int regionFlag = Array.IndexOf(arguments, "-landforms");
+                if (regionFlag >= 0)
+                {
+                    if (regionFlag + 1 < arguments.Length && int.TryParse(arguments[regionFlag + 1], out int size)
+                        && RegionalLandforms.Supports(size))
+                    {
+                        var timer = Stopwatch.StartNew();
+                        landforms = new RegionalLandforms(world.SeedBits, size, out _);
+                        UnityEngine.Debug.Log(FormattableString.Invariant($"Regional landforms | seed {worldSeed} | {size} km | {landforms.Side * landforms.Side} samples | {landforms.Rivers.Reaches.Length} river reaches | {timer.Elapsed.TotalMilliseconds:F2} ms"));
+                    }
+                    else
+                        UnityEngine.Debug.LogWarning("Use -landforms 16, -landforms 64 or -landforms 256 to select a test region.");
+                }
+#if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+                if (Array.IndexOf(arguments, "-reol-native-resolution") >= 0)
+                {
+                    DisplayInfo display = Screen.mainWindowDisplayInfo;
+                    Screen.SetResolution(display.width, display.height, FullScreenMode.FullScreenWindow);
+                }
+#endif
+                int rangeFlag = Array.IndexOf(arguments, "-world-view-distance-km");
+                if (rangeFlag >= 0 && rangeFlag + 1 < arguments.Length
+                    && float.TryParse(arguments[rangeFlag + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out float range)
+                    && range >= 10f && range <= 100f)
+                    ViewDistanceOverride = range * 1000f / 1.07f;
+                int surfaceFlag = Array.IndexOf(arguments, "-world-surface-bake");
+                if (surfaceFlag >= 0)
+                {
+                    if (surfaceFlag + 1 >= arguments.Length)
+                        throw new ArgumentException("-world-surface-bake requires a fixture directory.");
+                    surfaceData = TiledSurfaceData.Load(arguments[surfaceFlag + 1], worldSeed, landforms != null);
+                }
+#endif
+                field = new ContinentField(world, landforms, surfaceData);
+                worldHorizon = new WorldHorizon(transform, field, terrainMaterial, ocean, oceanMaterial);
                 caveHorizon = new WorldCaveHorizon(transform, field, worldHorizon);
-                inlandWater = new WorldInlandWater(transform, field.Surface, oceanMaterial);
+                if (!field.Surface.HasWaterTiles)
+                    inlandWater = new WorldInlandWater(transform, field.Surface, oceanMaterial);
                 palette = GlobalColor;
                 frame.CenterOn(field.Landing);
+                inlandWater?.Place(frame);
             }
             else
             {
                 field = new ContinentField();
                 horizon = new ContinentHorizon(transform, field, terrainMaterial);
                 palette = LegacyColor;
+                ocean.BuildFixed(field, frame);
             }
-            ocean = CreateOcean();
-            inlandWater?.Place(frame);
-            PlaceOcean(Landing);
             SetGroundOrigin();
         }
 
         public WorldPosition ToWorld(Vector3 local) => frame.ToWorld(local);
         public Vector3 ToLocal(WorldPosition point) => frame.ToLocal(point);
         public float SurfaceHeight(WorldPosition point) => field.HeightAt(point.X, point.Z);
+        internal RegionalClimate? GeneratedClimateAt(WorldPosition point) => field.Surface?.GeneratedClimateAt(point);
         public float SurfaceHeight(float x, float z) => largeWorld
             ? SurfaceHeight(frame.ToWorld(new Vector3(x, 0f, z))) - frame.Origin.y : field.HeightAt(x, z);
         public bool IsOcean(Vector3 point) => field.InOcean(frame.ToWorld(point));
         internal bool IsWater(Vector3 point) => field.InWater(frame.ToWorld(point));
+        internal bool TrySampleWaterColumn(WorldPosition feet, out float surface, out float bottom)
+        {
+            surface = field.WaterSurface(feet);
+            bottom = feet.Y < surface ? field.HeightAt(feet.X, feet.Z) : surface;
+            return feet.Y < surface && feet.Y >= bottom - 0.25 && surface > bottom;
+        }
+        internal bool TryGetWaterColumn(WorldPosition point, out float surface, out float bottom)
+        {
+            surface = field.WaterSurface(point);
+            bottom = field.HeightAt(point.X, point.Z);
+            return surface > bottom;
+        }
         internal bool IsUnderground(Vector3 point)
         {
             WorldPosition world = frame.ToWorld(point);
             return world.Y + 8 < field.HeightAt(world.X, world.Z);
         }
-        internal static float HorizonDistance(double elevation) => Mathf.Lerp(13500f, 100000f,
-            Mathf.Clamp01((float)elevation / 32768f));
+        internal float HorizonDistance(double elevation)
+        {
+            if (ViewDistanceOverride > 0f)
+                return ViewDistanceOverride;
+            float original = Mathf.Lerp(13500f, 100000f, Mathf.Clamp01((float)elevation / 32768f));
+            return Landforms == null ? original : Mathf.Max(original, Mathf.Min(60000f, 13500f + (float)elevation * 4.56f));
+        }
 
         internal bool NeedsShift(Vector3 local) => largeWorld && frame.NeedsShift(local);
 
@@ -186,8 +255,8 @@ namespace Reol2.World
             scheduled = false;
             worldHorizon.Reposition(frame);
             caveHorizon.Reposition(frame);
-            inlandWater.Place(frame);
-            PlaceOcean(frame.ToLocal(point));
+            inlandWater?.Place(frame);
+            ocean.Reposition(frame);
             SetGroundOrigin();
         }
 
@@ -322,24 +391,35 @@ namespace Reol2.World
 
         internal bool Pick(Ray aim, Vector3 eye, out Vector3Int dig, out Vector3Int fill, out WorldPosition sample, out bool placed)
         {
-            dig = fill = default;
-            sample = default;
-            placed = false;
-            if (!Physics.Raycast(aim, out RaycastHit hit, Reach + Vector3.Distance(aim.origin, eye),
+            if (!PickSurface(aim, eye, out RaycastHit hit))
+            {
+                dig = fill = default;
+                sample = default;
+                placed = false;
+                return false;
+            }
+            GetEditCells(aim, hit, out dig, out fill, out sample, out placed);
+            return field.Editable(dig) || field.Editable(fill);
+        }
+
+        internal bool PickSurface(Ray aim, Vector3 eye, out RaycastHit hit)
+        {
+            if (!Physics.Raycast(aim, out hit, Reach + Vector3.Distance(aim.origin, eye),
                 Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
                 || !hit.collider.transform.IsChildOf(transform))
                 return false;
-
             Vector3 line = hit.point - eye;
-            if (line.sqrMagnitude > Reach * Reach
-                || Physics.Raycast(eye, line, Mathf.Max(0f, line.magnitude - 0.06f),
-                    Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
-                return false;
+            return line.sqrMagnitude <= Reach * Reach
+                && !Physics.Raycast(eye, line, Mathf.Max(0f, line.magnitude - 0.06f),
+                    Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+        }
 
+        internal void GetEditCells(Ray aim, RaycastHit hit, out Vector3Int dig, out Vector3Int fill,
+            out WorldPosition sample, out bool placed)
+        {
             sample = frame.ToWorld(hit.point + aim.direction * 0.026f);
             dig = field.DigCellAt(sample, out placed);
             fill = frame.ToWorld(hit.point + hit.normal * 0.4f).Cell;
-            return field.Editable(dig) || field.Editable(fill);
         }
 
         internal string Prospect(WorldPosition point, bool placed)
@@ -388,24 +468,72 @@ namespace Reol2.World
                 return false;
             if (!field.Edit(cell, fill, out BoundsInt samples))
                 return false;
+            PublishEditedBounds(samples, fill);
+            return true;
+        }
 
+        public bool TryEditSphere(WorldPosition centerPoint, bool fill, CharacterController occupant = null)
+        {
+            float clearance = ContinentField.BrushRadius + ContinentField.Spacing * 0.5f;
+            if (fill && occupant != null && occupant.bounds.SqrDistance(frame.ToLocal(centerPoint)) < clearance * clearance)
+                return false;
+            if (!field.EditSphere(centerPoint, fill, out BoundsInt samples))
+                return false;
+            PublishEditedBounds(samples, fill);
+            return true;
+        }
+
+        public bool TryGrade(WorldPosition start, WorldPosition end, CharacterController occupant = null)
+        {
+            if (occupant != null)
+            {
+                Vector3 first = frame.ToLocal(start), last = frame.ToLocal(end);
+                Bounds body = occupant.bounds;
+                var along = new Vector2(last.x - first.x, last.z - first.z);
+                var delta = new Vector2(body.center.x - first.x, body.center.z - first.z);
+                float t = along.sqrMagnitude > 0f ? Mathf.Clamp01(Vector2.Dot(delta, along) / along.sqrMagnitude) : 0f;
+                float height = Mathf.Lerp(first.y, last.y, t);
+                float width = ContinentField.GradeHalfWidth + ContinentField.GradeShoulder + occupant.radius;
+                if ((delta - along * t).sqrMagnitude <= width * width && height > body.min.y + 0.02f
+                    && height - ContinentField.GradeMaxCutFill - ContinentField.Spacing <= body.max.y)
+                    return false;
+            }
+            if (!field.EditGrade(start, end, out _))
+                return false;
+            changedChunks.Clear();
+            foreach (Vector3Int chunk in field.GradeChangedChunks)
+                PrepareEditedChunk(chunk, null);
+            PublishEditedChunks();
+            return true;
+        }
+
+        private void PublishEditedBounds(BoundsInt samples, bool fill)
+        {
             changedChunks.Clear();
             foreach (Vector3Int chunk in ContinentField.AffectedChunks(samples).allPositionsWithin)
-            {
-                if (!ready.TryGetValue(chunk, out ResidentPage page))
-                    continue;
-                if (page.View == null && (fill ? page.Content == PageContent.Solid : page.Content == PageContent.Air))
-                    continue;
-                ready[chunk] = Prepare(chunk, page.View, editing: true);
-                changedChunks.Add(chunk);
-            }
+                PrepareEditedChunk(chunk, fill);
+            PublishEditedChunks();
+        }
+
+        private void PrepareEditedChunk(Vector3Int chunk, bool? fill)
+        {
+            if (!ready.TryGetValue(chunk, out ResidentPage page))
+                return;
+            if (page.View == null && ((fill == true && page.Content == PageContent.Solid)
+                || (fill == false && page.Content == PageContent.Air)))
+                return;
+            ready[chunk] = Prepare(chunk, page.View, editing: true);
+            changedChunks.Add(chunk);
+        }
+
+        private void PublishEditedChunks()
+        {
             foreach (Vector3Int chunk in changedChunks)
                 Publish(chunk);
             if (largeWorld)
                 UpdateCoverage(center);
             else
                 FlushColumns();
-            return true;
         }
 
         private void Schedule()
@@ -565,8 +693,7 @@ namespace Reol2.World
             else
                 caveHorizon.Deactivate();
             budget = entry ? 3 : Math.Max(0, 2.85 - Milliseconds(started));
-            worldHorizon.Stream(world, frame, entry, budget);
-            PlaceOcean(local);
+            worldHorizon.Stream(world, frame, entry, budget, HorizonDistance(world.Y));
         }
 
         private void UpdateCoverage(Vector3Int focus)
@@ -612,56 +739,6 @@ namespace Reol2.World
             }
         }
 
-        private Mesh CreateOcean()
-        {
-            float e = largeWorld ? 1f : ContinentField.Extent * 3f;
-            var mesh = new Mesh { name = "Sea surface" };
-            mesh.vertices = new[]
-            {
-                new Vector3(-e, 0f, -e), new Vector3(e, 0f, -e),
-                new Vector3(-e, 0f, e), new Vector3(e, 0f, e)
-            };
-            mesh.triangles = new[] { 0, 2, 1, 1, 2, 3 };
-            mesh.RecalculateBounds();
-            var surface = new GameObject("Ocean", typeof(MeshFilter), typeof(MeshRenderer));
-            oceanView = surface.transform;
-            oceanView.SetParent(transform, false);
-            surface.GetComponent<MeshFilter>().sharedMesh = mesh;
-            var renderer = surface.GetComponent<MeshRenderer>();
-            renderer.sharedMaterial = oceanMaterial;
-            renderer.shadowCastingMode = ShadowCastingMode.Off;
-            return mesh;
-        }
-
-        private void PlaceOcean(Vector3 focus)
-        {
-            if (!largeWorld)
-                return;
-            WorldPosition world = frame.ToWorld(focus);
-            bool shifted = oceanProperties == null || oceanPhaseOrigin != frame.Origin;
-            if (!shifted && Math.Abs(world.X - oceanAt.X) < 256 && Math.Abs(world.Z - oceanAt.Z) < 256
-                && Math.Abs(world.Y - oceanAt.Y) < 128)
-                return;
-            oceanAt = world;
-            float r = HorizonDistance(world.Y) * 1.12f;
-            float left = (float)Math.Max(-WorldDefinition.Extent - (double)frame.Origin.x, focus.x - r);
-            float right = (float)Math.Min(WorldDefinition.Extent - (double)frame.Origin.x, focus.x + r);
-            float back = (float)Math.Max(-WorldDefinition.Extent - (double)frame.Origin.z, focus.z - r);
-            float front = (float)Math.Min(WorldDefinition.Extent - (double)frame.Origin.z, focus.z + r);
-            oceanView.localPosition = new Vector3((left + right) * 0.5f, -frame.Origin.y, (back + front) * 0.5f);
-            oceanView.localScale = new Vector3((right - left) * 0.5f, 1f, (front - back) * 0.5f);
-            if (shifted)
-            {
-                oceanPhaseOrigin = frame.Origin;
-                oceanProperties ??= new MaterialPropertyBlock();
-                oceanProperties.SetVector(WaterOrigin,
-                    new Vector4(frame.Origin.x / 128, frame.Origin.z / 128, 0f, 0f));
-                oceanView.GetComponent<MeshRenderer>().SetPropertyBlock(oceanProperties);
-                inlandWater.SetRipples(oceanProperties);
-            }
-        }
-
-
         private void OnDestroy()
         {
             Shader.SetGlobalVector(GroundOrigin, Vector4.zero);
@@ -673,7 +750,7 @@ namespace Reol2.World
             caveHorizon?.Release();
             inlandWater?.Release();
             worldHorizon?.Release();
-            Destroy(ocean);
+            ocean?.Release();
         }
 
         private bool InsideWorld(Vector3Int chunk) => largeWorld ? WorldDefinition.ContainsPage(chunk) :
@@ -718,9 +795,12 @@ namespace Reol2.World
                 local.x / size, local.z / size);
             float height = chunk.y * size + local.y;
             Color32 color = WorldMaterial.ColorAt(height, normal, ground, ContinentField.Spacing, paletteTint.ShadeAt(local), true);
-            if (paletteVein is not MineralVein vein)
+            if (!paletteVein.HasValue && Landforms == null)
                 return color;
             var point = new WorldPosition(chunk.x * (double)size + local.x, height, chunk.z * (double)size + local.z);
+            color = field.TintForRegion(point, normal, ground, color, ContinentField.Spacing);
+            if (paletteVein is not MineralVein vein)
+                return color;
             if (!vein.Contains(point))
                 return color;
             Mineral mineral = vein.In(WorldGeology.LayerAt(height, ground));

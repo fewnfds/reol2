@@ -15,7 +15,6 @@ namespace Reol2.World
         private static readonly int CelestialDirection = Shader.PropertyToID("_SunDirection");
         private static readonly int CloudCover = Shader.PropertyToID("_Cloud");
         private static readonly ProfilerMarker AtmosphereMarker = new("Reol2.World.Environment");
-        private static readonly Color DeepWater = new(0.07f, 0.26f, 0.32f);
         private static readonly Color CaveDark = new(0.09f, 0.13f, 0.15f);
 
         [SerializeField] private Material skyTemplate;
@@ -39,6 +38,7 @@ namespace Reol2.World
         private Quaternion previousSunRotation;
         private ParticleSystem rain;
         private ParticleSystem snow;
+        private UnderwaterEffects waterEffects;
         private double pendingSeconds;
         private float nextSample;
         private float baseSunIntensity;
@@ -53,6 +53,9 @@ namespace Reol2.World
         private WeatherSample? previewWeather;
         internal ClimateSample Climate { get; private set; }
         internal WorldClock Clock => clock;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
+        internal WeatherSample RenderWeather => weather;
+#endif
         internal WeatherSample? PreviewWeather
         {
             get => previewWeather;
@@ -63,6 +66,7 @@ namespace Reol2.World
             }
         }
         internal int ActivePrecipitation => (rain?.particleCount ?? 0) + (snow?.particleCount ?? 0);
+        internal bool UnderwaterEffectsActive => waterEffects?.Active == true;
 
         private void Update()
         {
@@ -111,6 +115,9 @@ namespace Reol2.World
                 }
             }
 
+            if (underwater)
+                waterEffects ??= new UnderwaterEffects(view);
+            waterEffects?.Apply(underwater);
             WorldPosition at = terrain.ToWorld(view.transform.position);
             bool enclosed = underwater || underground;
             bool moved = !sampled || System.Math.Abs(at.X - lastSample.X) > 256
@@ -119,7 +126,7 @@ namespace Reol2.World
             {
                 sampled = true;
                 sheltered = enclosed;
-                float shelterTarget = underwater ? 0.66f : underground ? 0.45f : 1f;
+                float shelterTarget = underground ? 0.45f : 1f;
                 if (moved)
                     mediumLight = shelterTarget;
                 lastSample = at;
@@ -133,7 +140,7 @@ namespace Reol2.World
                 SetPrecipitation(snow, underRoof ? 0f : weather.Snow, Climate.Wind, true);
             }
 
-            float lightTarget = underwater ? 0.66f : underground ? 0.45f : 1f;
+            float lightTarget = underground ? 0.45f : 1f;
             mediumLight = Mathf.MoveTowards(mediumLight, lightTarget, Time.deltaTime * 2f);
             Shader.SetGlobalFloat(ShelterLight, mediumLight);
             if (!enclosed)
@@ -143,38 +150,40 @@ namespace Reol2.World
             }
             if (sun != null)
             {
-                LightShadows shadows = !enclosed && baseSunIntensity > 0.18f ? LightShadows.Hard : LightShadows.None;
+                LightShadows shadows = LightShadows.None;
+                if (!underground && baseSunIntensity > 0.18f)
+                    shadows = terrain.IsLargeWorld ? LightShadows.Soft : LightShadows.Hard;
                 if (sun.shadows != shadows)
                     sun.shadows = shadows;
                 // A fixed weather slot and world clock give the flash the same timing on return.
                 long flashSecond = clock.Tick % 1973;
-                float flash = !enclosed && weather.Storm > 0.6f && flashSecond < 11
+                float flash = !underground && weather.Storm > 0.6f && flashSecond < 11
                     ? (1f - flashSecond / 11f) * weather.Storm : 0f;
                 sun.intensity = baseSunIntensity * mediumLight + flash * 1.8f;
             }
-            view.clearFlags = !enclosed && sky != null ? CameraClearFlags.Skybox : CameraClearFlags.SolidColor;
-            Color fog = underwater ? DeepWater : underground ? CaveDark : horizon;
+            view.clearFlags = !underground && sky != null ? CameraClearFlags.Skybox : CameraClearFlags.SolidColor;
+            Color fog = underground ? CaveDark : horizon;
             view.backgroundColor = fog;
-            float range = ContinentTerrain.HorizonDistance(feet.Y);
+            float range = terrain.HorizonDistance(feet.Y);
             float visible = range * Mathf.Lerp(1f, 0.48f, weather.Haze);
             RenderSettings.fogColor = fog;
             if (terrain.IsLargeWorld)
             {
-                RenderSettings.fogStartDistance = underwater ? 12f : underground ? 225f : visible * 0.14f;
-                RenderSettings.fogEndDistance = underwater ? 210f : underground ? WorldCaveHorizon.VisibleDistance : visible;
-                view.farClipPlane = underwater ? 270f : underground ? WorldCaveHorizon.VisibleDistance + 40f : range * 1.07f;
+                RenderSettings.fogStartDistance = underground ? 225f : visible * 0.14f;
+                RenderSettings.fogEndDistance = underground ? WorldCaveHorizon.VisibleDistance : visible;
+                view.farClipPlane = underground ? WorldCaveHorizon.VisibleDistance + 40f : range * 1.07f;
             }
             else
             {
-                RenderSettings.fogStartDistance = underwater ? 7f : underground ? 20f : 360f;
-                RenderSettings.fogEndDistance = underwater ? 75f : underground ? 145f : Mathf.Lerp(2300f, 1400f, weather.Haze);
+                RenderSettings.fogStartDistance = underground ? 20f : 360f;
+                RenderSettings.fogEndDistance = underground ? 145f : Mathf.Lerp(2300f, 1400f, weather.Haze);
             }
         }
 
         private void SampleOutdoor(WorldPosition at, ContinentTerrain terrain)
         {
             ulong seed = unchecked((ulong)terrain.Seed);
-            Climate = WorldClimate.Sample(at, terrain.SurfaceHeight(at), clock.Tick, seed);
+            Climate = WorldClimate.Sample(at, terrain.SurfaceHeight(at), clock.Tick, seed, terrain.GeneratedClimateAt(at));
             weather = PreviewWeather ?? WorldWeather.Sample(at, clock.Tick, Climate, seed + 797);
             float timeAngle = (clock.DayFraction - 0.25f) * (2f * Mathf.PI);
             var direction = new Vector3(Mathf.Cos(timeAngle), Mathf.Sin(timeAngle), 0.29f).normalized;
@@ -268,6 +277,7 @@ namespace Reol2.World
         {
             if (!ownsEnvironment)
                 return;
+            waterEffects?.Release();
             if (SceneManager.GetActiveScene() == gameObject.scene)
             {
                 if (RenderSettings.skybox == sky)

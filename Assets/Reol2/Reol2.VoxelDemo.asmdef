@@ -1,5 +1,5 @@
 {
     "name": "Reol2.VoxelDemo",
     "rootNamespace": "Reol2",
-    "references": ["Unity.InputSystem", "UnityEngine.UI"]
+    "references": ["Unity.InputSystem", "UnityEngine.UI", "Unity.RenderPipelines.Core.Runtime", "Unity.RenderPipelines.Universal.Runtime"]
 }

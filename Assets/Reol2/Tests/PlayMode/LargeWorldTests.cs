@@ -89,6 +89,51 @@ namespace Reol2.Tests
         }
 
         [Test]
+        public void SeaSurfaceDoesNotCoverAnExcavationOnNaturalLand()
+        {
+            var pit = new WorldPosition(7533.5, 0, -399851.5);
+            float natural = terrain.SurfaceHeight(pit);
+            Assert.That(natural, Is.Positive);
+            var above = new WorldPosition(pit.X, natural + 3, pit.Z);
+            Assert.That(player.EnterAt(above), Is.True);
+            for (int y = -3; y <= Mathf.FloorToInt(natural); y++)
+                Assert.That(terrain.TryEdit(new Vector3Int(pit.Cell.x, y, pit.Cell.z), fill: false), Is.True);
+            for (int i = 0; i < 200; i++)
+                terrain.Stream(player.transform.position, Vector3.zero);
+            Assert.That(terrain.HorizonLevelAt(pit), Is.Zero);
+            Assert.That(terrain.IsWater(terrain.ToLocal(new WorldPosition(pit.X, -1.2, pit.Z))), Is.False);
+            Assert.That(SeaMeshCovers(pit), Is.False);
+
+            WorldPosition sea = terrain.OceanEntry;
+            Assert.That(player.EnterAt(sea), Is.True);
+            for (int i = 0; i < 200; i++)
+                terrain.Stream(player.transform.position, Vector3.zero);
+            Assert.That(terrain.IsWater(player.transform.position), Is.True);
+            Assert.That(SeaMeshCovers(new WorldPosition(sea.X, 0, sea.Z)), Is.True);
+        }
+
+        private bool SeaMeshCovers(WorldPosition point)
+        {
+            Transform oceanView = terrain.transform.Find("Ocean");
+            if (!oceanView.GetComponent<MeshRenderer>().enabled)
+                return false;
+            MeshFilter ocean = oceanView.GetComponent<MeshFilter>();
+            Vector3 at = ocean.transform.InverseTransformPoint(terrain.ToLocal(point));
+            Assert.That(at.y, Is.Zero.Within(0.001f), "the sea mesh stays at world Y=0 after a vertical origin shift");
+            Vector3[] vertices = ocean.sharedMesh.vertices;
+            for (int i = 0; i < vertices.Length; i += 3)
+            {
+                Vector3 a = vertices[i], b = vertices[i + 1], c = vertices[i + 2];
+                float span = Side(a, b, c);
+                if (span != 0f && Side(a, b, at) * span >= 0f && Side(b, c, at) * span >= 0f && Side(c, a, at) * span >= 0f)
+                    return true;
+            }
+            return false;
+
+            static float Side(Vector3 a, Vector3 b, Vector3 p) => (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
+        }
+
+        [Test]
         public void FarArrivalDiscardsPendingPagesFromThePreviousLocation()
         {
             Assert.That(player.EnterAt(terrain.WorldLanding), Is.True);

@@ -36,13 +36,7 @@ namespace Reol2.Editor
 
             const string directory = "Builds/VoxelDemo";
             Directory.CreateDirectory(directory);
-            BuildReport report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
-            {
-                scenes = new[] { ScenePath },
-                locationPathName = directory + "/Reol2VoxelDemo.exe",
-                target = BuildTarget.StandaloneWindows64,
-                options = BuildOptions.Development
-            });
+            BuildReport report = BuildPipeline.BuildPlayer(WindowsTestBuild.Options(ScenePath, directory + "/Reol2VoxelDemo.exe"));
             if (report.summary.result != BuildResult.Succeeded)
                 throw new System.InvalidOperationException($"Voxel Demo build {report.summary.result}.");
 

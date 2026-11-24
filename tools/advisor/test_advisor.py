@@ -13,7 +13,7 @@ import threading
 import unittest
 import wave
 
-from transport import STUDIO_CONFIG, WEB_CONFIG
+from transport import LEGACY_CONFIG, WEB_CONFIG
 
 HERE = Path(__file__).resolve().parent
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aAVcAAAAASUVORK5CYII=")
@@ -64,7 +64,6 @@ class AdvisorCLI(unittest.TestCase):
         self.web_key = "offline-web-test-secret"
         self.base_url = f"http://127.0.0.1:{self.server.server_port}/v1"
         self.web_env = {"REOL_ADVISOR_WEB_BASE_URL": self.base_url, "REOL_ADVISOR_WEB_API_KEY": self.web_key}
-        self.dual_env = {**self.web_env, "REOL_ADVISOR_BASE_URL": self.base_url, "REOL_ADVISOR_API_KEY": self.key}
         # Legacy output settings must not leak into any constructed request.
         self.config.write_text(json.dumps({"base_url": self.base_url,
                                            "api_key": self.key, "max_tokens": 1}), encoding="utf-8")
@@ -111,11 +110,14 @@ class AdvisorCLI(unittest.TestCase):
         self.reply = reply
         output = self.root / "web-default"
         self.cli("ask", "--prompt", "检查区块提交", "--attach", source, "--out-dir", output, explicit_config=False,
-                 env=self.dual_env)
+                 env=self.web_env)
         self.assertEqual(len(self.requests), 2)
         for method, path, body, auth in self.requests:
             self.assertEqual((method, path, auth), ("POST", "/v1/chat/completions", "Bearer " + self.web_key))
-            self.assertIn("public int Revision;", body["messages"][-1]["content"])
+            message, = body["messages"]
+            self.assertEqual(message["role"], "user")
+            self.assertTrue(message["content"].startswith("检查区块提交\n"))
+            self.assertIn("public int Revision;", message["content"])
             self.assertIs(body["stream"], False)
             self.assertFalse({"temperature", "thinking"} & body.keys())
             self.assert_uncapped(body)
@@ -135,7 +137,7 @@ class AdvisorCLI(unittest.TestCase):
 
         self.reply = reply
         output = self.root / "mixed"
-        self.cli("ask", "--prompt", "检查", "--out-dir", output, explicit_config=False, env=self.dual_env)
+        self.cli("ask", "--prompt", "检查", "--out-dir", output, explicit_config=False, env=self.web_env)
         summary = self.load(output)
         self.assertEqual(summary["status"], "partial")
         self.assertEqual(summary["results"]["web-1"]["status"], "complete")
@@ -153,48 +155,32 @@ class AdvisorCLI(unittest.TestCase):
 
         self.reply = reply
         output = self.root / "web-failed"
-        self.cli("ask", "--provider", "gemini-web", "--prompt", "检查", "--out-dir", output, explicit_config=False,
-                 env=self.dual_env, expected=2)
+        legacy_env = {**self.web_env, "REOL_ADVISOR_BASE_URL": self.base_url, "REOL_ADVISOR_API_KEY": self.key}
+        self.cli("ask", "--prompt", "检查", "--out-dir", output,
+                 explicit_config=False, env=legacy_env, expected=2)
         summary = self.load(output)
-        self.assertEqual(summary["status"], "failed")
+        self.assertEqual((summary["status"], summary["provider"]), ("failed", "gemini-web"))
         self.assertEqual(summary["results"]["web-1"]["status"], "failed")
         self.assertEqual(summary["results"]["web-2"]["status"], "empty_answer")
         self.assertEqual(len(self.requests), 2)
         self.assertTrue(all(row[3] == "Bearer " + self.web_key for row in self.requests))
 
-    def test_default_consultation_falls_back_once_with_frozen_inputs(self):
-        source = self.root / "Chunk.cs"
-        source.write_text("original source", encoding="utf-8")
-        studio_arrived = threading.Barrier(2, timeout=1.5)
-
-        def reply(method, path, body):
-            if body["model"] == "gemini-4-neon-search":
-                studio_arrived.wait()
-                return chat("Studio completed")
-            if body["model"] == "gemini-4-neon-task":
-                source.write_text("changed during Web requests", encoding="utf-8")
-            return 503, "application/json", b'{"error":"upstream offline"}'
-
-        self.reply = reply
-        output = self.root / "fallback"
-        self.cli("ask", "--prompt", "检查", "--attach", source, "--out-dir", output,
-                 explicit_config=False, env=self.dual_env)
-        self.assertEqual([row[3] for row in self.requests], ["Bearer " + self.web_key] * 2 + ["Bearer " + self.key] * 2)
-        self.assertCountEqual([row[2]["temperature"] for row in self.requests[2:]], [1.0, 1.2])
-        for _, _, body, _ in self.requests:
-            self.assertIn("original source", body["messages"][-1]["content"])
-            self.assertNotIn("changed during", body["messages"][-1]["content"])
-        summary = self.load(output)
-        self.assertEqual((summary["provider"], summary["status"], summary["fallback_from"]), ("aistudio", "complete", "gemini-web"))
-        self.assertEqual({label for label, result in summary["results"].items() if result["code"] == 0}, {"neon-1.0", "neon-1.2"})
-        self.assertIn("Studio completed", (output / "answers.md").read_text(encoding="utf-8"))
+    def test_retired_provider_is_rejected_before_contacting_gateway(self):
+        result = self.cli("ask", "--provider", "aistudio", "--prompt", "检查", expected=2,
+                          explicit_config=False, env=self.web_env)
+        self.assertIn("gemini-web", result.stderr)
+        self.assertEqual(self.requests, [])
 
     def test_dry_run_saves_requests_without_contacting_gateway(self):
         preview = self.root / "web-dry-run"
         self.cli("ask", "--dry-run", "--prompt", "检查", "--out-dir", preview)
         self.assertEqual(self.requests, [])
         self.assertEqual(self.load(preview)["status"], "prepared")
-        self.assertEqual(len(list(preview.glob("*/request.json"))), 2)
+        requests = list(preview.glob("*/request.json"))
+        self.assertEqual(len(requests), 2)
+        for payload in requests:
+            self.assertEqual(self.load(payload.parent, payload.name)["messages"],
+                             [{"role": "user", "content": "检查"}])
 
     def test_web_model_overrides_can_collect_one_shot_and_task_in_the_same_run(self):
         source = self.root / "chunk.cs"
@@ -227,7 +213,7 @@ class AdvisorCLI(unittest.TestCase):
 
     def test_missing_explicit_config_fails_before_contacting_gateway(self):
         result = self.cli("models", "--config", self.root / "missing.json", explicit_config=False,
-                          env=self.dual_env, expected=1)
+                          env=self.web_env, expected=1)
         self.assertIn("Advisor config file not found", result.stderr)
         self.assertEqual(self.requests, [])
 
@@ -237,31 +223,21 @@ class AdvisorCLI(unittest.TestCase):
         youtube = "https://youtu.be/abcdefghijk"
         self.cli("ask", "--model", "gemini-4-neon", "--prompt", "检查附件", "--attach", video,
                  "--attach", youtube, "--out-dir", self.root / "web-media", explicit_config=False, env=self.web_env)
-        parts = self.requests[0][2]["messages"][-1]["content"]
+        message, = self.requests[0][2]["messages"]
+        self.assertEqual(message["role"], "user")
+        parts = message["content"]
+        self.assertEqual(parts[0], {"type": "text", "text": "检查附件"})
         files = [part["file"] for part in parts if part["type"] == "file"]
         self.assertEqual(files, [
             {"filename": "clip.mp4", "file_data": "data:video/mp4;base64," + base64.b64encode(VIDEO).decode()},
             {"file_url": youtube},
         ])
 
-    def test_aistudio_can_be_selected_and_uses_its_video_attachment_format(self):
-        output = self.root / "studio"
-        video = "https://youtu.be/abcdefghijk"
-        self.cli("ask", "--provider", "aistudio", "--prompt", "检查", "--attach", video, "--out-dir", output,
-                 explicit_config=False, env=self.dual_env)
-        self.assertEqual(len(self.requests), 2)
-        for _, _, payload, auth in self.requests:
-            self.assertEqual(auth, "Bearer " + self.key)
-            self.assertEqual(payload["model"], "gemini-4-neon-search")
-            self.assertEqual((payload["thinking"], payload["reasoning_effort"]), ("high", "high"))
-            self.assertIn({"type": "video_url", "video_url": {"url": video}}, payload["messages"][-1]["content"])
-        self.assertEqual(self.load(output)["provider"], "aistudio")
-
     def test_provider_configuration_and_attachments_keep_credentials_separate(self):
-        wrong = self.cli("ask", "--provider", "gemini-web", "--config", STUDIO_CONFIG, "--prompt", "检查",
+        wrong = self.cli("ask", "--provider", "gemini-web", "--config", LEGACY_CONFIG, "--prompt", "检查",
                          expected=1, explicit_config=False, env=self.web_env)
-        self.assertIn("belongs to aistudio", wrong.stderr)
-        for path in (WEB_CONFIG, STUDIO_CONFIG):
+        self.assertIn("retired gateway configuration", wrong.stderr)
+        for path in (WEB_CONFIG, LEGACY_CONFIG):
             attached = self.cli("ask", "--prompt", "检查", "--attach", path, expected=1)
             self.assertIn("Credential/config files cannot be sent", attached.stderr)
         self.assertEqual(self.requests, [])
@@ -293,7 +269,9 @@ class AdvisorCLI(unittest.TestCase):
         self.assertEqual(len(self.requests), 2)
         payloads = [req[2] for req in self.requests]
         self.assertEqual(summary["results"]["web-1"]["status"], "complete")
-        content = payloads[0]["messages"][1]["content"]
+        message, = payloads[0]["messages"]
+        self.assertEqual(message["role"], "user")
+        content = message["content"]
         self.assertIn("original source", content[0]["text"])
         self.assertNotIn("changed while", content[0]["text"])
         self.assertTrue({"text", "image_url", "input_audio", "file"} <= {part["type"] for part in content})

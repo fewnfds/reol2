@@ -9,6 +9,8 @@ namespace Reol2.World
     [DisallowMultipleComponent, RequireComponent(typeof(Animator))]
     public sealed class PlayerAnimatorDriver : MonoBehaviour
     {
+        // Both swim clips fit above the controller base when the hips are anchored here.
+        internal const float SwimHipsHeight = 0.90f;
         private static readonly ProfilerMarker DriveMarker = new("Reol2.Player.Animation");
         private static readonly ProfilerMarker IkMarker = new("Reol2.Player.FootIK");
         private static readonly int Speed = Animator.StringToHash("Speed");
@@ -21,7 +23,8 @@ namespace Reol2.World
         };
 
         private Animator animator;
-        private Transform feet;
+        private Transform feet, hips;
+        private Vector3 standingLocalPosition;
         private bool grounded;
         private float airborneTime, landingTime;
         private float groundSpeed;
@@ -36,12 +39,15 @@ namespace Reol2.World
             animator.applyRootMotion = false;
             var explorer = GetComponentInParent<ContinentExplorer>();
             feet = explorer != null ? explorer.transform : transform;
+            hips = animator.GetBoneTransform(HumanBodyBones.Hips);
+            standingLocalPosition = transform.localPosition;
         }
 
         internal void ResetMotion()
         {
             airborneTime = landingTime = groundSpeed = leftWeight = rightWeight = 0f;
             grounded = false;
+            transform.localPosition = standingLocalPosition;
             Pose = ExplorerPose.Ground;
             animator.SetFloat(Speed, 0f);
             animator.Play(StateHashes[(int)Pose], 0, 0f);
@@ -74,12 +80,26 @@ namespace Reol2.World
                 airborneTime += dt;
                 landingTime = 0f;
                 next = jumped || (Pose == ExplorerPose.Takeoff && airborneTime < 0.19f) ? ExplorerPose.Takeoff
-                    : airborneTime >= 0.09f ? ExplorerPose.Air : Pose;
+                    : airborneTime >= 0.09f || Pose == ExplorerPose.Swim ? ExplorerPose.Air : Pose;
             }
             if (next == Pose)
                 return;
+            bool changesSwimAnchor = Pose == ExplorerPose.Swim || next == ExplorerPose.Swim;
             Pose = next;
-            animator.CrossFadeInFixedTime(StateHashes[(int)Pose], next == ExplorerPose.Takeoff ? 0.045f : 0.10f, 0);
+            if (changesSwimAnchor)
+            {
+                if (next != ExplorerPose.Swim)
+                    transform.localPosition = standingLocalPosition;
+                animator.Play(StateHashes[(int)Pose], 0, 0f);
+            }
+            else
+                animator.CrossFadeInFixedTime(StateHashes[(int)Pose], next == ExplorerPose.Takeoff ? 0.045f : 0.10f, 0);
+        }
+
+        private void LateUpdate()
+        {
+            if (Pose == ExplorerPose.Swim && hips != null)
+                transform.position += feet.position + Vector3.up * SwimHipsHeight - hips.position;
         }
 
         private void OnAnimatorIK(int layer)

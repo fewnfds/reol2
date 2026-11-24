@@ -20,6 +20,7 @@ namespace Reol2.Demo
         [SerializeField] private LineRenderer fillOutline = null;
         [SerializeField] private Text hint = null;
 
+        private readonly TestMovementSpeed movementSpeed = new();
         private CharacterController motor;
         private InputActionMap input;
         private InputAction move;
@@ -56,16 +57,19 @@ namespace Reol2.Demo
             SetMouseCaptured(true);
         }
 
-        private void Update()
+        private void Update() => ProcessInput(Keyboard.current, Mouse.current, Time.deltaTime, Application.isFocused);
+
+        internal void ProcessInput(Keyboard keyboard, Mouse mouse, float dt, bool focused)
         {
-            Keyboard keyboard = Keyboard.current;
-            Mouse mouse = Mouse.current;
+            if (focused)
+                movementSpeed.ApplyStep(TestMovementSpeed.ReadStep(keyboard));
             if (keyboard?.escapeKey.wasPressedThisFrame == true)
                 SetMouseCaptured(false);
 
             if (Cursor.lockState != CursorLockMode.Locked)
             {
-                if (mouse?.leftButton.wasPressedThisFrame == true)
+                if (focused && mouse?.leftButton.wasPressedThisFrame == true
+                    && !movementSpeed.HandlePointer(mouse.position.ReadValue(), pressed: true))
                     SetMouseCaptured(true);
                 ShowAim(false);
                 SetHint("Click to capture mouse");
@@ -81,11 +85,11 @@ namespace Reol2.Demo
             }
 
             Vector2 aimDelta = look.ReadValue<Vector2>();
-            float sensitivity = look.activeControl?.device is Gamepad ? 120f * Time.deltaTime : MouseSensitivity;
+            float sensitivity = look.activeControl?.device is Gamepad ? 120f * dt : MouseSensitivity;
             yaw += aimDelta.x * sensitivity;
             pitch = Mathf.Clamp(pitch - aimDelta.y * sensitivity, -55f, 70f);
 
-            MoveForFrame(move.ReadValue<Vector2>(), Time.deltaTime);
+            MoveForFrame(move.ReadValue<Vector2>(), dt);
             UpdateCamera();
             UpdateAim(digAction.WasPressedThisFrame(), mouse?.rightButton.wasPressedThisFrame == true);
         }
@@ -107,7 +111,7 @@ namespace Reol2.Demo
             verticalSpeed = motor.isGrounded && verticalSpeed <= 0f
                 ? GroundingSpeed
                 : Mathf.Max(-24f, verticalSpeed - Gravity * deltaTime);
-            motor.Move((direction * WalkSpeed + Vector3.up * verticalSpeed) * deltaTime);
+            motor.Move((direction * (WalkSpeed * movementSpeed.Multiplier) + Vector3.up * verticalSpeed) * deltaTime);
             if (transform.position.y < -2f)
                 ResetPosition();
             if (transform.position.x > 1.45f && transform.position.y < 3.5f
@@ -185,6 +189,8 @@ namespace Reol2.Demo
             if (hint.text != message)
                 hint.text = message;
         }
+
+        private void OnGUI() => movementSpeed.DrawHud(Application.isFocused && Cursor.lockState != CursorLockMode.Locked);
 
         private static void SetMouseCaptured(bool captured)
         {

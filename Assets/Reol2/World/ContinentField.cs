@@ -17,6 +17,11 @@ namespace Reol2.World
         internal const int Columns = 2 * Extent / ChunkSize;
         internal const int FirstColumn = -Extent / ChunkSize;
         internal const float Spacing = DensityVolume.Spacing;
+        internal const float BrushRadius = 0.65f;
+        private const float SpurHalfWidth = 0.10f;
+        internal const float GradeHalfWidth = 1f;
+        internal const float GradeShoulder = 0.75f;
+        internal const float GradeMaxCutFill = 1.25f;
 
         private readonly float[,] heights;
         private readonly float[] heightSamples = new float[DensityVolume.SampleWidth * DensityVolume.SampleWidth];
@@ -31,6 +36,10 @@ namespace Reol2.World
         private readonly WorldSurface surface;
         private readonly ulong materialSeed;
         private readonly List<CavePart> caveParts = new(8);
+        private readonly List<GradeColumn> gradeColumns = new();
+        private readonly HashSet<Vector3Int> gradeChangedChunks = new();
+        private readonly List<Vector3Int> openedSamples = new();
+        private readonly Dictionary<Vector3Int, float> spurRepairs = new();
 
         internal WorldPosition Landing { get; }
         internal WorldPosition SeaEntry { get; }
@@ -38,14 +47,32 @@ namespace Reol2.World
         internal int EditedSamples { get; private set; }
         internal long EvaluatedDensitySamples { get; private set; }
         internal bool HasEdits(Vector3Int page) => editedChunks.Contains(page);
+        internal IReadOnlyCollection<Vector3Int> GradeChangedChunks => gradeChangedChunks;
 
-        internal ContinentField(WorldDefinition world = null)
+        internal ContinentField(WorldDefinition world = null, RegionalLandforms landforms = null, IWorldSurfaceData data = null)
         {
             materialSeed = world?.SeedBits ?? 20261121UL;
             if (world != null)
             {
-                surface = new WorldSurface(world);
+                surface = new WorldSurface(world, landforms, data);
                 Caves = new WorldCaves(world, surface);
+                if (landforms != null)
+                {
+                    WorldPosition point = surface.Place(landforms.Landing);
+                    Landing = new WorldPosition(point.X, HeightAt(point.X, point.Z) + 0.18f, point.Z);
+                    landingCell = Landing.Cell;
+                    SeaEntry = surface.Place(landforms.SeaEntry, -0.8);
+                    return;
+                }
+                if (data != null)
+                {
+                    WorldPosition spawn = data.Spawn;
+                    Landing = new WorldPosition(spawn.X, HeightAt(spawn.X, spawn.Z) + 0.18f, spawn.Z);
+                    landingCell = Landing.Cell;
+                    SeaEntry = data.SeaEntry;
+                    return;
+                }
+
                 double east = world.ContinentCenter.x + 0.5;
                 double shore = FindShore(world.ContinentCenter, 8f);
                 Landing = new WorldPosition(east, HeightAt(east, shore) + 0.18f, shore);
@@ -117,9 +144,12 @@ namespace Reol2.World
                                   Mathf.FloorToInt((bounds.y + 0.002f) / ChunkSize));
         }
 
-        internal bool InOcean(WorldPosition point) => point.Y < 0d && point.Y > HeightAt(point.X, point.Z);
+        internal bool InOcean(WorldPosition point) => point.Y < 0d && point.Y > HeightAt(point.X, point.Z)
+            && (surface == null || surface.NearConnectedSea(point.X, point.Z));
         internal bool InWater(WorldPosition point) => surface == null ? InOcean(point)
             : point.Y < surface.WaterAt(point.X, point.Z) && point.Y > surface.HeightAt(point.X, point.Z);
+
+        internal float WaterSurface(WorldPosition point) => surface == null ? 0f : surface.WaterAt(point.X, point.Z);
 
         internal bool IsClearSky(WorldPosition first, WorldPosition last, int padding)
         {
@@ -489,15 +519,256 @@ namespace Reol2.World
                 Vector3 offset = (Vector3)(sample - start) * Spacing - Vector3.one * 0.5f;
                 float stamp = DensityVolume.RoundedBox(offset, Vector3.one * 0.55f, 0.08f);
                 float next = fill ? Mathf.Min(current.Density, stamp) : Mathf.Max(current.Density, -stamp);
-                if (next == current.Density)
-                    continue;
-                Vector3Int? source = next >= 0f ? null : current.Density >= 0f ? cell : current.Source;
-                WriteEdit(sample, new SampleEdit(next, source));
-                if (sample.y * Spacing >= WorldSurface.HighestTerrain)
-                    highEditRegions.Add(new Vector3Int(sample.x >> 8, sample.y >> 8, sample.z >> 8));
-                low = Vector3Int.Min(low, sample);
-                high = Vector3Int.Max(high, sample);
+                StoreChange(sample, current, next, cell, ref low, ref high);
             }
+            return CompleteBrush(low, high, out changed);
+        }
+
+        internal bool EditSphere(WorldPosition center, bool fill, out BoundsInt changed)
+        {
+            changed = default;
+            if (!WorldDefinition.Contains(center) || (surface == null && !Editable(center.Cell)))
+                return false;
+
+            openedSamples.Clear();
+            // The band supplies the outer endpoint of every lattice edge that the sphere crosses.
+            const float reach = BrushRadius + Spacing;
+            Vector3Int start = new((int)Math.Ceiling((center.X - reach) / Spacing),
+                                   (int)Math.Ceiling((center.Y - reach) / Spacing),
+                                   (int)Math.Ceiling((center.Z - reach) / Spacing));
+            Vector3Int end = new((int)Math.Floor((center.X + reach) / Spacing),
+                                 (int)Math.Floor((center.Y + reach) / Spacing),
+                                 (int)Math.Floor((center.Z + reach) / Spacing));
+            if (surface != null)
+            {
+                start = WorldDefinition.ClampSample(start);
+                end = WorldDefinition.ClampSample(end);
+            }
+            else if (!SculptRangeAllowed(start, end))
+                return false;
+
+            Vector3Int low = end + Vector3Int.one, high = start - Vector3Int.one;
+            for (int z = start.z; z <= end.z; z++)
+            for (int y = start.y; y <= end.y; y++)
+            for (int x = start.x; x <= end.x; x++)
+            {
+                // Subtract in world double precision before converting to brush-local floats.
+                var offset = new Vector3((float)(x * (double)Spacing - center.X),
+                                         (float)(y * (double)Spacing - center.Y),
+                                         (float)(z * (double)Spacing - center.Z));
+                if (offset.sqrMagnitude > reach * reach)
+                    continue;
+                Vector3Int sample = new(x, y, z);
+                SampleEdit current = Read(sample);
+                float stamp = offset.magnitude - BrushRadius;
+                float next = fill ? Mathf.Min(current.Density, stamp) : Mathf.Max(current.Density, -stamp);
+                if (surface != null && current.Density < 0f && next >= 0f)
+                    openedSamples.Add(sample);
+                StoreChange(sample, current, next, null, ref low, ref high);
+            }
+            if (openedSamples.Count > 0)
+                RemoveCutSpurs(ref low, ref high);
+            return CompleteBrush(low, high, out changed);
+        }
+
+        private void RemoveCutSpurs(ref Vector3Int low, ref Vector3Int high)
+        {
+            spurRepairs.Clear();
+            foreach (Vector3Int opened in openedSamples)
+            for (int axis = 0; axis < 3; axis++)
+            {
+                var step = Vector3Int.zero;
+                step[axis] = 1;
+                FindCutSpur(opened - step);
+                FindCutSpur(opened + step);
+            }
+
+            // Inspect the same post-cut field for every candidate before removing any tips.
+            foreach (var repair in spurRepairs)
+                StoreChange(repair.Key, Read(repair.Key), repair.Value, null, ref low, ref high);
+        }
+
+        private void FindCutSpur(Vector3Int sample)
+        {
+            if (sample != WorldDefinition.ClampSample(sample) || spurRepairs.ContainsKey(sample))
+                return;
+            float density = SampleAt(sample);
+            if (density >= 0f)
+                return;
+
+            int narrowAxes = 0;
+            float air = float.PositiveInfinity;
+            // Both zero crossings must lie close to the sample on two axes. A sheet, ridge,
+            // or thin column with solid neighbours at both ends of an axis keeps its support.
+            float minNeighbour = -density * (Spacing / SpurHalfWidth - 1f);
+            for (int axis = 0; axis < 3; axis++)
+            {
+                var step = Vector3Int.zero;
+                step[axis] = 1;
+                float a = SampleAt(sample - step), b = SampleAt(sample + step);
+                if (a < 0f && b < 0f)
+                    return;
+                float near = Mathf.Min(a, b);
+                if (near < minNeighbour)
+                    continue;
+                narrowAxes++;
+                air = Mathf.Min(air, near);
+            }
+            if (narrowAxes >= 2)
+                spurRepairs.Add(sample, air);
+        }
+
+        internal bool EditGrade(WorldPosition start, WorldPosition end, out BoundsInt changed)
+        {
+            changed = default;
+            gradeColumns.Clear();
+            gradeChangedChunks.Clear();
+            if (!WorldDefinition.Contains(start) || !WorldDefinition.Contains(end))
+                return false;
+            double dx = end.X - start.X, dz = end.Z - start.Z;
+            double length = Math.Sqrt(dx * dx + dz * dz);
+            if (length < 2d || length > 32d || Math.Abs(end.Y - start.Y) > 0.5d * length)
+                return false;
+
+            double ux = dx / length, uz = dz / length;
+            const double width = GradeHalfWidth + GradeShoulder;
+            int x0 = (int)Math.Ceiling((Math.Min(start.X, end.X) - width) / Spacing);
+            int x1 = (int)Math.Floor((Math.Max(start.X, end.X) + width) / Spacing);
+            int z0 = (int)Math.Ceiling((Math.Min(start.Z, end.Z) - width) / Spacing);
+            int z1 = (int)Math.Floor((Math.Max(start.Z, end.Z) + width) / Spacing);
+            // Select the complete layer first. Reject ambiguous columns before touching any page.
+            for (int z = z0; z <= z1; z++)
+            for (int x = x0; x <= x1; x++)
+            {
+                double px = x * (double)Spacing - start.X, pz = z * (double)Spacing - start.Z;
+                double along = Math.Clamp(px * ux + pz * uz, 0d, length);
+                double acrossX = px - along * ux, acrossZ = pz - along * uz;
+                double distance = Math.Sqrt(acrossX * acrossX + acrossZ * acrossZ);
+                if (distance >= width)
+                    continue;
+                double target = start.Y + (end.Y - start.Y) * (along / length);
+                float blend = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((float)((width - distance) / GradeShoulder)));
+                if (!SelectGradeColumn(x, z, target, blend))
+                    return false;
+            }
+
+            Vector3Int low = new(int.MaxValue, int.MaxValue, int.MaxValue);
+            Vector3Int high = new(int.MinValue, int.MinValue, int.MinValue);
+            foreach (GradeColumn column in gradeColumns)
+            {
+                Vector3Int columnLow = new(column.X + 1, column.Top + 1, column.Z + 1);
+                Vector3Int columnHigh = new(column.X - 1, column.Bottom - 1, column.Z - 1);
+                for (int y = column.Bottom; y <= column.Top; y++)
+                {
+                    Vector3Int sample = new(column.X, y, column.Z);
+                    SampleEdit current = Read(sample);
+                    float plane = (float)(y * (double)Spacing - column.Height);
+                    // Both ends of a crossing edge need the same plane, including on old non-planar edits.
+                    StoreChange(sample, current, plane, null, ref columnLow, ref columnHigh);
+                }
+                if (columnLow.x > columnHigh.x)
+                    continue;
+                low = Vector3Int.Min(low, columnLow);
+                high = Vector3Int.Max(high, columnHigh);
+                var columnBounds = new BoundsInt(columnLow, columnHigh - columnLow + Vector3Int.one);
+                foreach (Vector3Int page in AffectedChunks(columnBounds).allPositionsWithin)
+                    gradeChangedChunks.Add(page);
+            }
+            if (gradeChangedChunks.Count == 0)
+                return false;
+            changed = new BoundsInt(low, high - low + Vector3Int.one);
+            editedChunks.UnionWith(gradeChangedChunks);
+            return true;
+        }
+
+        private bool SelectGradeColumn(int x, int z, double designHeight, float blend)
+        {
+            const double checkDepth = GradeMaxCutFill + Spacing;
+            int bottom = (int)Math.Floor((designHeight - checkDepth) / Spacing);
+            int top = (int)Math.Ceiling((designHeight + checkDepth) / Spacing);
+            if (!SculptRangeAllowed(new Vector3Int(x, bottom, z), new Vector3Int(x, top, z)))
+                return false;
+            float previous = SampleAt(new Vector3Int(x, bottom, z));
+            if (previous >= 0f)
+                return false;
+            double currentHeight = double.NaN;
+            for (int y = bottom + 1; y <= top; y++)
+            {
+                float density = SampleAt(new Vector3Int(x, y, z));
+                if (previous >= 0f && density < 0f)
+                    return false;
+                if (previous < 0f && density >= 0f)
+                    currentHeight = (y - 1d + previous / (previous - density)) * Spacing;
+                previous = density;
+            }
+            double delta = designHeight - currentHeight;
+            if (double.IsNaN(currentHeight) || Math.Abs(delta) > GradeMaxCutFill)
+                return false;
+            // An envelope makes shoulders join the terrain and keeps a repeated stroke idempotent.
+            double shoulderAllowance = GradeMaxCutFill * (1d - blend);
+            double target = Math.Clamp(currentHeight, designHeight - shoulderAllowance, designHeight + shoulderAllowance);
+            if (Math.Abs(target - currentHeight) < 0.0001d)
+                return true;
+            // Touch just the old and new surfaces and one interpolation edge on either side.
+            int from = (int)Math.Floor(Math.Min(currentHeight, target) / Spacing) - 1;
+            int to = (int)Math.Ceiling(Math.Max(currentHeight, target) / Spacing) + 1;
+            if (!SculptRangeAllowed(new Vector3Int(x, from - 1, z), new Vector3Int(x, to + 1, z)))
+                return false;
+            if (TouchesOtherSurface(x, from, z, target, solid: true) ||
+                TouchesOtherSurface(x, to, z, target, solid: false))
+                return false;
+            gradeColumns.Add(new GradeColumn(x, z, from, to, target));
+            return true;
+        }
+
+        private bool TouchesOtherSurface(int x, int y, int z, double target, bool solid)
+        {
+            float original = SampleAt(new Vector3Int(x, y, z));
+            if (original == (float)(y * (double)Spacing - target))
+                return false;
+            // A signed sample positions zero crossings on all six incident lattice edges. At the
+            // outer end of this write, keep a cave ceiling, upper floor or wall edge stationary.
+            int outsideY = y + (solid ? -1 : 1);
+            return (SampleAt(new Vector3Int(x, outsideY, z)) < 0f) != solid ||
+                   (SampleAt(new Vector3Int(x - 1, y, z)) < 0f) != solid ||
+                   (SampleAt(new Vector3Int(x + 1, y, z)) < 0f) != solid ||
+                   (SampleAt(new Vector3Int(x, y, z - 1)) < 0f) != solid ||
+                   (SampleAt(new Vector3Int(x, y, z + 1)) < 0f) != solid;
+        }
+
+        private bool SculptRangeAllowed(Vector3Int start, Vector3Int end)
+        {
+            if (surface != null)
+                return start == WorldDefinition.ClampSample(start) && end == WorldDefinition.ClampSample(end);
+            const int steps = DensityVolume.SamplesPerMeter;
+            if (start.x < (-Extent + ChunkSize) * steps || end.x > (Extent - ChunkSize) * steps ||
+                start.z < (-Extent + ChunkSize) * steps || end.z > (Extent - ChunkSize) * steps ||
+                start.y < (Bedrock + 1) * steps || end.y > (Ceiling - 2) * steps)
+                return false;
+            Vector3Int safeMin = (landingCell - new Vector3Int(1, 2, 1)) * steps;
+            Vector3Int safeMax = (landingCell + new Vector3Int(2, 3, 2)) * steps;
+            return end.x < safeMin.x || start.x > safeMax.x || end.y < safeMin.y || start.y > safeMax.y ||
+                   end.z < safeMin.z || start.z > safeMax.z;
+        }
+
+        private void StoreChange(Vector3Int sample, SampleEdit current, float next, Vector3Int? placementCell,
+                                 ref Vector3Int low, ref Vector3Int high)
+        {
+            if (next == current.Density)
+                return;
+            bool added = next < 0f && current.Density >= 0f;
+            Vector3Int? source = next >= 0f ? null : added ? placementCell : current.Source;
+            bool sculptedFill = next < 0f && (added ? !placementCell.HasValue : current.SculptedFill);
+            WriteEdit(sample, new SampleEdit(next, source, sculptedFill));
+            if (sample.y * Spacing >= WorldSurface.HighestTerrain)
+                highEditRegions.Add(new Vector3Int(sample.x >> 8, sample.y >> 8, sample.z >> 8));
+            low = Vector3Int.Min(low, sample);
+            high = Vector3Int.Max(high, sample);
+        }
+
+        private bool CompleteBrush(Vector3Int low, Vector3Int high, out BoundsInt changed)
+        {
+            changed = default;
             if (low.x > high.x)
                 return false;
 
@@ -509,14 +780,12 @@ namespace Reol2.World
 
         internal bool Editable(Vector3Int cell)
         {
-            if (surface != null && (cell.x < -WorldDefinition.Extent || cell.x >= WorldDefinition.Extent
-                || cell.z < -WorldDefinition.Extent || cell.z >= WorldDefinition.Extent
-                || cell.y <= WorldDefinition.MinY || cell.y >= WorldDefinition.MaxY))
-                return false;
+            if (surface != null)
+                return cell.x >= -WorldDefinition.Extent && cell.x < WorldDefinition.Extent
+                    && cell.z >= -WorldDefinition.Extent && cell.z < WorldDefinition.Extent
+                    && cell.y >= WorldDefinition.MinY && cell.y < WorldDefinition.MaxY;
             Vector3Int offset = cell - landingCell;
             bool nearLanding = Mathf.Abs(offset.x) <= 1 && Mathf.Abs(offset.z) <= 1 && Mathf.Abs(offset.y) <= 2;
-            if (surface != null)
-                return !nearLanding;
             return !nearLanding && cell.y > Bedrock && cell.y < Ceiling - 2
                 && cell.x >= -Extent + ChunkSize && cell.x < Extent - ChunkSize
                 && cell.z >= -Extent + ChunkSize && cell.z < Extent - ChunkSize;
@@ -530,6 +799,7 @@ namespace Reol2.World
                 (float)(samplePoint.Z - corner.z));
             float closest = float.PositiveInfinity;
             Vector3Int? source = null;
+            placed = false;
             for (int z = 0; z <= 1; z++)
             for (int y = 0; y <= 1; y++)
             for (int x = 0; x <= 1; x++)
@@ -544,8 +814,8 @@ namespace Reol2.World
                     continue;
                 closest = distance;
                 source = value.Source;
+                placed = source.HasValue || value.SculptedFill;
             }
-            placed = source.HasValue;
             return source ?? point.Cell;
         }
 
@@ -568,8 +838,28 @@ namespace Reol2.World
             return new BoundsInt(min, max - min + Vector3Int.one);
         }
 
-        internal Color32 MaterialAt(WorldPosition point, Vector3 normal, float ground, float spacing) =>
-            WorldMaterial.Sample(point, normal, ground, spacing, materialSeed, surface != null);
+        internal Color32 MaterialAt(WorldPosition point, Vector3 normal, float ground, float spacing)
+        {
+            Color32 color = WorldMaterial.Sample(point, normal, ground, spacing, materialSeed, surface != null);
+            return TintForRegion(point, normal, ground, color, spacing);
+        }
+
+        internal Color32 TintForRegion(WorldPosition point, Vector3 normal, float ground, Color32 color, float spacing)
+        {
+            if (point.Y > 2d && point.Y > ground - 1d
+                && surface?.GeneratedClimateAt(point) is RegionalClimate climate)
+            {
+                color = WorldMaterial.TintForClimate(color, climate, (float)point.Y, normal);
+                if (spacing < 32f)
+                {
+                    float river = surface.RiverWaterAt(point.X, point.Z, ground);
+                    float detail = 1f - WorldNoise.Ramp((spacing - 8f) / 24f);
+                    if (river > 0f && ground - river < 3.5f)
+                        color = WorldMaterial.TintRiverSediment(color, point, ground - river, detail, materialSeed);
+                }
+            }
+            return color;
+        }
 
         internal WorldMaterial.PageTint PrepareTint(int x, int z) => new(x, z, materialSeed, surface != null);
 
@@ -664,12 +954,30 @@ namespace Reol2.World
         private readonly struct SampleEdit
         {
             internal readonly float Density;
+            // A rounded box can protrude into the next logical cell; clicking it targets its source.
+            // Sculpted fill can span many cells, so it is marked as placed but picked where it is hit.
             internal readonly Vector3Int? Source;
+            internal readonly bool SculptedFill;
 
-            internal SampleEdit(float density, Vector3Int? source)
+            internal SampleEdit(float density, Vector3Int? source, bool sculptedFill = false)
             {
                 Density = density;
                 Source = source;
+                SculptedFill = sculptedFill;
+            }
+        }
+
+        private readonly struct GradeColumn
+        {
+            internal readonly int X, Z, Bottom, Top;
+            internal readonly double Height;
+            internal GradeColumn(int x, int z, int bottom, int top, double height)
+            {
+                X = x;
+                Z = z;
+                Bottom = bottom;
+                Top = top;
+                Height = height;
             }
         }
 

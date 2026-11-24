@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using NUnit.Framework;
 using Reol2.Demo;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
 using UnityEngine.TestTools;
 
@@ -25,6 +26,47 @@ namespace Reol2.Tests
             player = Object.FindFirstObjectByType<VoxelDemoPlayer>();
             motor = player.GetComponent<CharacterController>();
             player.enabled = false;
+        }
+
+        [Test]
+        public void TestSpeedKeysAndHudChangeMovementWithoutChangingFallSpeed()
+        {
+            var input = new InputTestFixture();
+            input.Setup();
+            try
+            {
+                var keyboard = InputSystem.AddDevice<Keyboard>();
+                var mouse = InputSystem.AddDevice<Mouse>();
+                Vector3 normal = StepAboveTrail();
+                Assert.That(normal.x, Is.EqualTo(3.1f * Step).Within(0.001f));
+
+                input.Press(keyboard.numpadPlusKey);
+                player.ProcessInput(keyboard, mouse, Step, focused: true);
+                Vector3 faster = StepAboveTrail();
+                Assert.That(faster.x, Is.EqualTo(2f * normal.x).Within(0.001f));
+                Assert.That(faster.y, Is.EqualTo(normal.y).Within(0.001f));
+
+                input.Set(mouse.position, new Vector2(Screen.width - 157f, 43f));
+                input.Press(mouse.leftButton);
+                player.ProcessInput(keyboard, mouse, Step, focused: true);
+                Assert.That(Cursor.lockState, Is.EqualTo(CursorLockMode.None));
+                Assert.That(StepAboveTrail().x, Is.EqualTo(normal.x).Within(0.001f));
+            }
+            finally
+            {
+                input.TearDown();
+            }
+
+            Vector3 StepAboveTrail()
+            {
+                player.ResetPosition();
+                motor.enabled = false;
+                player.transform.position += Vector3.up * 8f;
+                motor.enabled = true;
+                Vector3 start = player.transform.position;
+                player.MoveForFrame(Vector2.up, Step);
+                return player.transform.position - start;
+            }
         }
 
         [Test]

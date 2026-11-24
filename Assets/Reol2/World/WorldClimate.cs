@@ -19,7 +19,8 @@ namespace Reol2.World
 
     internal static class WorldClimate
     {
-        internal static ClimateSample Sample(WorldPosition point, float ground, long tick, ulong seed)
+        internal static ClimateSample Sample(WorldPosition point, float ground, long tick, ulong seed,
+            RegionalClimate? generated = null)
         {
             Vector3Int cell = point.Cell;
             float continental = WorldNoise.Value(cell.x, cell.z, 19, seed + 751);
@@ -27,6 +28,13 @@ namespace Reol2.World
             float latitude = Mathf.Clamp01(Mathf.Abs(cell.z) / (float)WorldDefinition.Extent);
             float season = Mathf.Cos((tick % WorldClock.Year) / (float)WorldClock.Year * (2f * Mathf.PI));
             float day = Mathf.Cos(((tick % WorldClock.Day) / (float)WorldClock.Day - 0.62f) * (2f * Mathf.PI));
+            if (generated is RegionalClimate regional)
+            {
+                float relativeAltitude = Mathf.Max(-525f, (float)point.Y - ground);
+                float regionalTemperature = regional.Temperature - relativeAltitude * 0.0062f + season * 3f + day * 3f;
+                float regionalHumidity = Mathf.Clamp01(0.16f + regional.Aridity * 0.32f - season * 0.07f);
+                return new ClimateSample(regionalTemperature, regionalHumidity, new Vector2(4f + 5f * regionalHumidity, local * 1.7f));
+            }
             float height = Mathf.Max(0f, (float)point.Y);
             float temperature = 21f - 24f * latitude - height * 0.0058f
                 + continental * 8f + local * 4f + season * 6f + day * 3f;

@@ -1,79 +1,53 @@
-# 随机大世界试玩与实测
-
-世界每个水平轴有 `2²⁷` 个 1 米格，约 134,218 公里。海平面是 `Y=0`，可用标高为 `[-32768, 32768)`。天然地形按世界种子和坐标求值，近处以 0.5 米样本构造可挖填的平滑曲面。两公里大陆用于同机性能对照。[生成与流送方案](roadmap/large-world.md) · [两公里大陆基准](continent-demo.md)
+# 随机大世界试玩与验证
 
 ## 试玩
 
-在仓库根目录运行本轮构建 `Builds/WorldExpansion/Reol2World.exe`，保持程序与同目录数据文件放在一起。`Builds/LargeWorld` 中保留地形接缝修复后的对照版本。Unity 中可用 `Reol 2 → Open Large World` 打开 `Assets/Scenes/LargeWorld.unity`。默认种子是 `20261121`，用 `-world-seed 14376` 等参数可生成另一个世界。[视觉、自然系统和角色](roadmap/world-visual-nature-character.md)
+在本机双击 `Builds/LargeWorld/Play-River-Demo.cmd`。默认以种子 `20261121` 打开自研 64 公里区域，从河段上空开始，使用所在屏幕的原生分辨率和无边框全屏。直接运行同目录的 `Reol2World.exe` 可进入默认大世界。Unity 编辑器菜单为 `Reol 2 → Open Large World`，场景为 `Assets/Scenes/LargeWorld.unity`。[本机河流试玩](../Builds/LargeWorld/Play-River-Demo.cmd) · [坐标、流送与水位](roadmap/world-engine.md)
 
 | 按键 | 行为 |
 | --- | --- |
-| WASD、鼠标、Alt、Shift | 移动、环顾、慢走、快跑 |
-| F、Space/C | 切换飞行。地面跳跃、下蹲，飞行和水中升降 |
-| 左键、右键 | 近处挖填 |
-| G、] | 勘探眼前地形，或前进三个游戏小时 |
-| F1 | 去大陆近海的浅水处，可下潜至海床 |
-| F2、F3 | 去同一座巨洞的西、东入口并开启飞行 |
-| F4 | 去海平面下约 32.56 公里的深洞。继续下降后可挖洞底 |
-| F5 | 去河流汇入的盆地湖上空 |
-| F6 | 去深海沟水面 |
-| F7 | 从约 32.76 公里高空俯瞰主山脉 |
-| T、Home、Esc | 输入世界坐标远传、回出生海岸、释放鼠标 |
+| `W/S`、`A/D`、`Q/E` | 前后移动、左右转向、左右横移。右键掌舵时 `A/D` 横移。 |
+| 左键拖动、右键拖动、双键同按 | 环顾、掌舵、沿视线前进。滚轮缩放镜头。 |
+| `Shift`、`Alt`、`C` | 冲刺或飞游加速、地面慢走、地面蹲行。 |
+| `=`、`-` 或右下角 `+`、`−` | 移动倍率翻倍或减半，适用于地面、飞行和游泳。初始为 1×。 |
+| `F`、`Space`、`X/C` | 切换飞行。地面按 `Space` 跳跃。空中按 `Space` 上升、`X/C` 下降。水中按 `Space` 上浮、`X/C` 下潜。 |
+| 水面右键掌舵前进 | 默认沿水面游，俯角达到 25° 时下潜。 |
+| `1`、`2`、`G` | 在指针或准星命中处挖、填、勘探。 |
+| `3`、`Esc`、`B` | 以两个地面位置确定整形坡面，`Esc` 取消起点。`B` 切换连续笔刷和一米盒刷。 |
+| `]` | 推进三个游戏小时。 |
+| `F1` 至 `F7` | 去近海、巨洞西口、巨洞东口、深洞、湖盆、海沟、高空。 |
+| `T`、`Home`、`Esc` | 输入世界坐标远传、回出生点、取消面板或释放拖动。 |
+| `F8` | 在本机保存截图和渲染复现包。 |
 
-远传先准备目的地附近的地形和角色包络，再放置角色。填入岩层内部、超出世界边界或阻挡角色的目的地会被拒绝。地形改动可在离开并卸载后回访，关闭程序会结束本次世界改动。跨会话存档与挖通海床后的水体连通属于后续 E2/E3。[存档方案](roadmap/voxel-storage.md) · [水体方案](roadmap/world-engine.md#4-海水洞穴和可挖海床)
+## 地形精度
 
-## 实现
+连续球刷半径 0.65 米，球心沿命中表面法线偏移 0.20 米。两点整形要求水平距离 2–32 米，核心宽 2 米，两侧各有 0.75 米过渡。工具检查选中的地表层与角色占用。近场渲染与碰撞共用 0.5 米密度采样的曲面。可在同一进程离开后回访改动。[地形编辑](../Assets/Reol2/World/ContinentField.cs) · [基础玩法验证](roadmap/world-engine.md#编辑碰撞与通行)
 
-- 整数页键和双精度世界位置共用一个三轴浮动原点。地形、射线、角色、水面和远景都用同一换算。末页的闭合样本和法线 halo 有稳定归属。[坐标换算](../Assets/Reol2/World/WorldFrame.cs) · [活动页与碰撞](../Assets/Reol2/World/ContinentTerrain.cs)
-- 世界总图保留 `257 × 257` 个陆海节点。近处高度从种子、整数噪声晶格和地貌函数求值。主大陆有海岸、大陆架、海沟、丘陵、高原、连续雪山、主河与封闭湖盆。主河共享同一条中心曲线与沿程水位。其它大陆目前由陆海与地貌函数生成，洲际分层流域仍待接入。[全球陆海轮廓](../Assets/Reol2/World/WorldAtlas.cs) · [局部地貌与水位](../Assets/Reol2/World/WorldSurface.cs)
-- 巨洞由椭球洞室与有界通道相连。原型主洞室约 `1,208 × 264 × 588` 米，入口间有约 2.48 公里的水平行程。房间内部和长水柱可证明为空时跳过密度取样。洞壁按图元范围扫描，编辑覆盖按唯一所有者页散射到所需样本。[洞形与范围判定](../Assets/Reol2/World/WorldCaves.cs)
-- 编辑沿用同一份曲面和碰撞计算。相交洞形能证明被其它洞形覆盖时省去逐样本求值。连续编辑复用最近 16 页、约 0.42 MiB 的天然密度，每次从当前编辑读覆盖。[密度与编辑](../Assets/Reol2/World/ContinentField.cs)
-- 远景从粗父瓦片逐步切到完整子瓦片，世界地表缓存上限 224 片。洞口附近由就绪的三维洞穴页接管地表，并用与近场一致的草地至岩石渐变着色。洞内的 8 米粗网格保留连续洞壁，屏幕上由精细地形先占据像素，粗网格补足边沿。已编辑的活动页从覆盖中排除旧粗网格，高精地形继续同步提供碰撞。只在页到达或离开地表交接范围时更新洞口覆盖。[高度瓦片](../Assets/Reol2/World/WorldHorizon.cs) · [洞内远景](../Assets/Reol2/World/WorldCaveHorizon.cs) · [地形渲染](../Assets/Reol2/Visuals/VoxelSurface.shader)
+## 区域地貌与水岸
 
-## 验收结果
+区域试玩使用自研河网、湖盆、海岸、山地和高原。河床与水面共用沿程断面，当前河道可在谷底内平滑转向。默认 64 公里版两张问题图的位置已做 Windows 前后对照。海水依据天然海床与海平面提供浮潜，挖出低于海平面的陆地干坑也保持原来的水域判定。超粗的 8,192 米瓦片仍可能漏绘少量窄支流。[当前地貌与河道实测](H:/reol2-workbench/goals/landform-generation/river-centerline-implementation.md) · [水位与瓦片排查](pitfalls/regional-water-tiles.md)
 
-E7 首次验收为 Unity Play Mode 22 项全部通过，包括旧场景的 14 项回归。Windows Player 在种子 `20261121` 和 `14376` 上都完成走路、飞行、潜水、穿洞和四远角挖填。以下为当时默认种子的 `world-player-verified.log`。单位为毫秒。[最新渲染回归](#地表和洞穴接缝回归)
+## 本机验证
 
-| 逐帧渲染路线 | 帧数 | 总帧 P95 | 总帧 P99 | 最大总帧 | 流送 P99 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 海岸步行 | 720 | 1.403 | 2.702 | 8.042 | 1.456 |
-| 海岸飞行 | 1,200 | 2.583 | 3.702 | 5.248 | 1.818 |
-| 普通海床下潜 | 990 | 1.613 | 2.376 | 10.916 | 1.047 |
-| 海沟下潜至 `Y=−11171.97` | 1,327 | 1.539 | 2.447 | 3.418 | 0.957 |
-| 贯穿巨洞 2,479.95 米 | 1,120 | 5.012 | 5.479 | 16.196 | 3.979 |
-| `Y=+32760` 高空飞行 | 720 | 0.973 | 1.186 | 3.162 | 0.086 |
-
-这 6,077 帧均低于 60 Hz 的 16.67 毫秒预算，关键路径未出现缺页或流送拦停。巨洞的采样阶段 P99 为 3.209 毫秒，仍是最重的流送负载。同机两公里环海大陆折返流送 P99 为 1.527 毫秒，两条海岸航线经过的地貌不同。种子 `14376` 的逐帧路线最高 P99 为 5.458 毫秒，峰值 15.311 毫秒。
-
-- **挖填到碰撞。** 洞室与通道重叠处的一次编辑最多影响八页。密度缓存与洞形剔除将重复编辑 P99 从 14.378 降至 0.894 毫秒，冷缓存首次编辑从 15.626 降至 10.903 毫秒。首次编辑所在整帧为 12.605 毫秒。深洞反复挖填到碰撞 P99 为 1.521 毫秒，卸载后回访仍命中修改后的洞底。四远角从请求远传到就位约 3.94 至 4.43 毫秒。
-- **千公里连续高空。** 以 68 米/秒跨 `999,999.88 × 999,999.88` 米范围。41,595 个连续步、488 次重定位、零流送拦停，近场页为零。远景峰值 224 片，Unity 已分配内存约 91.3 MiB，移动步 CPU P99 为 0.721 毫秒。
-- **64 公里连续贴地。** 18,824 个 50 毫秒步，从同一岸线飞行 64,001.92 米，零流送拦停。累计准备 201,484 页，同时最多 111 个碰撞网格。流送步 P99 为 2.131 毫秒。结束后原地稳定为 97.0 MiB，离开低空后回落到 92.1 MiB，活动页归零。这里的内存为 Unity 已分配额度。
-
-### 地表和洞穴接缝回归
-
-修前的洞穴页会把地表再绘一遍，并把整片地表染成黄灰色。洞口上方高度图与三维页的近共面三角形会争抢深度。洞内两套几何采样间距相差 16 倍，旧方案在精细页边沿直接剪去粗洞壁，切口会暴露背景。用 Neon High 和 Neon Task 复核后，选择按已就绪的体积页移交洞口地表，并在洞内以渲染模板测试让连续的粗洞壁填补精细网格边沿。修复后仍可在部分角度看到粗细网格的轮廓和光照过渡，洞内远端按现有流送规格渐隐至雾色。
-
-Unity Play Mode 23 项通过。Windows 在 `20261121` 与 `14376` 上复查洞口外、洞口视角扫动、洞道内连续移动 16 米和两侧墙壁的断口。两种种子的同机位对照中，近处的横截面漏光消失，洞外的整页黄灰色斑消失，扫动时未再出现原先的闪烁条。`14376` 中的低位洞段沿用原型水位，会看到原有的横向水面。原始图像、对照图、复现路线日志与顾问复审保存在本机 `.local/research/terrain-seams-2026-11-22/`。
-
-| 同机 Windows 复测 | 修前 | 修后 |
-| --- | ---: | ---: |
-| 巨洞整帧 P99 | 6.649 ms | 6.981 ms |
-| 巨洞流送 P99 | 4.607 ms | 4.784 ms |
-| 64 公里贴地流送 P99 | 3.616 ms | 3.618 ms |
-
-修后巨洞 1,120 帧中有两帧超过 16.67 毫秒，最大 24.751 毫秒。洞穴交界冷缓存首次编辑所在帧为 17.424 毫秒，修前对照为 17.731 毫秒。千公里高空和 64 公里贴地路线均无流送拦停。64 公里飞行结束后离开低空，Unity 已分配额度从 98.9 MiB 回落到 93.2 MiB，活动页归零。
+2026 年 11 月 24 日最近一轮验证通过 83 项 Play Mode。Windows 复跑了 16、64、256 公里的步行、挖掘回访、飞行和游泳，以及固定河口和沿海路线。区域生成性能取决于尺寸、种子和本机条件。[区域测试报告与性能](H:/reol2-workbench/goals/landform-generation/river-centerline-implementation.md)
 
 ## 复现
 
-Windows 基准用 Unity `6000.3.29f1` Development Player、i5-13600KF、RTX 3060、D3D12，1600 × 900 离屏 URP 渲染。`-world-long-run` 附加跨千公里区域的高空对角线及持续准备近场碰撞的贴地航线。长途脚本加速推进时间并间隔渲染。走路、海岸飞行、潜水、巨洞、高空和洞穴交界处编辑基准逐帧渲染。帧时由 Player 的真实帧间隔测得。GPU 图像读回通过，`FrameTimingManager` 在这套离屏路径返回 0 个单独的 GPU 时间样本。Windows 原始日志、Play Mode XML 和读回图像存放在本机 `.local/research/e7-implementation-2026-11-21/`。
+从仓库根目录运行。Windows 基准使用本地试玩构建，`-continent-benchmark` 完成后自动退出。[通用开发入口](development.md#windows-本地试玩构建)
 
-```powershell
+~~~powershell
 unity test . --mode PlayMode --output .local/large-world-playmode.xml --non-interactive
 unity build . --target StandaloneWindows64 --execute-method Reol2.Editor.ContinentAuthoring.BuildLargeWorld --output Builds/LargeWorld/Reol2World.exe --allow-dirty-build --non-interactive
-$worldProbe = Start-Process -FilePath 'Builds/LargeWorld/Reol2World.exe' -WorkingDirectory (Get-Location).Path -ArgumentList @('-continent-benchmark', '-world-long-run', '-screen-width', '1600', '-screen-height', '900', '-screen-fullscreen', '0', '-logFile', '.local/large-world-benchmark.log', '-continent-image', '.local/large-world.png') -WindowStyle Hidden -PassThru -Wait
-$worldProbe.ExitCode
-```
+~~~
 
-在同一构建加 `-world-seed 14376` 可复跑第二种地貌。第二个种子的验收使用逐帧路线、远传及编辑检查，长途数据来自默认种子。
+| Player 启动参数 | 验证 |
+| --- | --- |
+| `-landforms 16/64/256` | 选择其一进入相应尺寸的区域，附加 `-world-seed <整数>` 可切换种子。 |
+| `-continent-benchmark -landforms 64 -landform-check` | 区域步行、飞行、挖掘回访和游泳。 |
+| `-continent-benchmark -world-controls-check` | 水面游泳、潜水、上浮和飞行控制。可附加 `-landforms 64` 复跑区域模式。 |
+| `-continent-benchmark -world-long-run` | 默认大世界千公里高空与 64 公里贴地路线。 |
+| `-continent-benchmark -world-seam-check` | 洞口和洞内的地表接缝。 |
+| `-continent-benchmark -world-shoreline-check` | 陆地挖坑与天然近海。 |
+| `-continent-benchmark -landforms 64 -world-water-tile-check <report.json>` | 按 F8 机位复现区域水面，附加 `-world-water-tile-settle` 等待瓦片队列。 |
 
-复查渲染接缝时，把上述 Player 命令中的 `-world-long-run` 换成 `-world-seam-check`。`-continent-image` 的输出路径会生成一组带 `ground`、`mouth-sweep`、`passage` 和 `tunnel-step` 后缀的截图。试玩时也可以按 `F2`，转动视角后向洞内飞行。
+基准可用 `-continent-image <path>` 写图、`-logFile <path>` 写日志。手动试玩遇到异常时先停在现场，按 `F8` 保留完整复现包。[复现包内容与路径](development.md#渲染复现包)

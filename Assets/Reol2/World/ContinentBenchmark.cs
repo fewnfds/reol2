@@ -1,8 +1,9 @@
-#if DEVELOPMENT_BUILD
+#if DEVELOPMENT_BUILD || REOL_TEST_BUILD
 using System;
 using System.Collections;
 using System.IO;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using Unity.Profiling;
 using UnityEngine.Profiling;
 using UnityEngine.Rendering;
@@ -10,7 +11,7 @@ using Stage = Reol2.World.ContinentStreamProbe.Stage;
 
 namespace Reol2.World
 {
-    internal sealed class ContinentBenchmark : MonoBehaviour
+    internal sealed partial class ContinentBenchmark : MonoBehaviour
     {
         private const float Step = 1f / 60f;
         private ContinentTerrain terrain;
@@ -22,14 +23,16 @@ namespace Reol2.World
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Install()
         {
-            if (Array.IndexOf(Environment.GetCommandLineArgs(), "-continent-benchmark") >= 0)
-                FindFirstObjectByType<ContinentExplorer>()?.gameObject.AddComponent<ContinentBenchmark>();
+            if (Array.IndexOf(Environment.GetCommandLineArgs(), "-continent-benchmark") < 0)
+                return;
+
+            Application.runInBackground = true;
+            FindFirstObjectByType<ContinentExplorer>()?.gameObject.AddComponent<ContinentBenchmark>();
         }
 
         private IEnumerator Start()
         {
             yield return null;
-            Application.runInBackground = true;
             Application.targetFrameRate = -1;
             QualitySettings.vSyncCount = 0;
             player = GetComponent<ContinentExplorer>();
@@ -54,6 +57,102 @@ namespace Reol2.World
                 Debug.Log($"Continent benchmark | {SystemInfo.processorType} | {SystemInfo.graphicsDeviceName} | {SystemInfo.graphicsDeviceType} | {target.width}x{target.height} offscreen");
                 if (terrain.IsLargeWorld)
                 {
+                    string[] args = Environment.GetCommandLineArgs();
+                    int captureBake = Array.IndexOf(args, "-world-capture-surface-bake");
+                    if (captureBake >= 0)
+                    {
+                        try
+                        {
+                            CaptureSurfaceBake(args[captureBake + 1]);
+                            Application.Quit(0);
+                        }
+                        catch (Exception error)
+                        {
+                            Debug.LogException(error);
+                            Application.Quit(1);
+                        }
+                        yield break;
+                    }
+                    int bakeRoute = Array.IndexOf(args, "-world-surface-bake-check");
+                    if (bakeRoute >= 0)
+                    {
+                        yield return CheckSurfaceBake(target, args[bakeRoute + 1]);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-terrain-shadow-check") >= 0)
+                    {
+                        yield return CheckTerrainShadows(target);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-landform-check") >= 0)
+                    {
+                        yield return CheckLandforms(target);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-water-coast-check") >= 0)
+                    {
+                        yield return CheckWaterAndCoast(target);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-estuary-check") >= 0)
+                    {
+                        yield return CheckEstuaries(target);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-ocean-orbit-check") >= 0)
+                    {
+                        yield return CheckOceanOrbit(target);
+                        yield break;
+                    }
+                    int waterReport = Array.IndexOf(Environment.GetCommandLineArgs(), "-world-water-tile-check");
+                    if (waterReport >= 0)
+                    {
+                        yield return CheckWaterTile(target, Environment.GetCommandLineArgs(), waterReport);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-crater-check") >= 0)
+                    {
+                        try
+                        {
+                            WorldSculptProbe.CaptureCrater(terrain, player, view, Render, suffix => CaptureIfRequested(target, suffix));
+                            Application.Quit(0);
+                        }
+                        catch (Exception error)
+                        {
+                            Debug.LogException(error);
+                            Application.Quit(1);
+                        }
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-sculpt-check") >= 0)
+                    {
+                        yield return WorldSculptProbe.Run(terrain, player, view, Render, suffix => CaptureIfRequested(target, suffix));
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-precision-check") >= 0)
+                    {
+                        try
+                        {
+                            TerrainPrecisionBenchmark.Run(terrain);
+                            Application.Quit(0);
+                        }
+                        catch (Exception error)
+                        {
+                            Debug.LogException(error);
+                            Application.Quit(1);
+                        }
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-shoreline-check") >= 0)
+                    {
+                        yield return CaptureShoreline(target);
+                        yield break;
+                    }
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-controls-check") >= 0)
+                    {
+                        yield return MeasureControls(target);
+                        yield break;
+                    }
                     if (Array.IndexOf(Environment.GetCommandLineArgs(), "-world-expansion-check") >= 0)
                     {
                         yield return CaptureExpansion(target);
@@ -119,6 +218,153 @@ namespace Reol2.World
             }
         }
 
+        private IEnumerator CaptureShoreline(RenderTexture target)
+        {
+            var pit = new WorldPosition(7533.5, 0d, -399851.5);
+            float ground = terrain.SurfaceHeight(pit);
+            if (!Check(ground > 0f && player.EnterAt(new WorldPosition(pit.X, ground + 5f, pit.Z)), "dry pit arrival"))
+                yield break;
+            for (int z = -1; z <= 1; z++)
+            for (int x = -1; x <= 1; x++)
+            for (int y = -3; y <= Mathf.FloorToInt(ground + 0.5f); y++)
+                terrain.TryEdit(new Vector3Int(pit.Cell.x + x, y, pit.Cell.z + z), fill: false);
+            yield return WarmWorld(200);
+            var ocean = terrain.transform.Find("Ocean").GetComponent<MeshRenderer>();
+            if (!Check(Physics.Raycast(terrain.ToLocal(new WorldPosition(pit.X, ground + 4f, pit.Z)), Vector3.down,
+                out RaycastHit bottom) && terrain.ToWorld(bottom.point).Y < -1d, "excavated pit is open below the sea level"))
+                yield break;
+            if (!Check(!AffectedByOcean(pit, ground + 5f), "no rendered ocean in dry pit"))
+                yield break;
+            CaptureIfRequested(target, "dry-pit");
+
+            WorldPosition sea = terrain.OceanEntry;
+            if (!Check(player.EnterAt(sea), "shoreline sea arrival"))
+                yield break;
+            yield return WarmWorld(200);
+            // Keep the player and their shadow out of the pixel used for the sea surface test.
+            var seaView = new WorldPosition(sea.X + 5d, sea.Y, sea.Z);
+            if (!Check(terrain.IsWater(terrain.ToLocal(seaView)) && terrain.IsWater(player.transform.position), "natural sea has water"))
+                yield break;
+            bool hasOcean = AffectedByOcean(seaView, 5d);
+            CaptureIfRequested(target, "natural-sea");
+            if (!Check(hasOcean, "natural sea surface is rendered"))
+                yield break;
+            Debug.Log("World shoreline | excavated land stays dry and natural sea renders over swimmable water");
+            Application.Quit(0);
+
+            bool AffectedByOcean(WorldPosition point, double height)
+            {
+                view.transform.SetPositionAndRotation(terrain.ToLocal(new WorldPosition(point.X, height, point.Z)),
+                    Quaternion.Euler(90f, 0f, 0f));
+                player.Environment.Apply(view, terrain, player.WorldFeet, underwater: false, underground: false);
+                var pixel = new Texture2D(1, 1, TextureFormat.RGB24, false);
+                RenderTexture previous = RenderTexture.active;
+                bool enabled = ocean.enabled;
+                try
+                {
+                    ocean.enabled = false;
+                    Color32 dry = ReadCenter();
+                    ocean.enabled = enabled;
+                    Color32 withOcean = ReadCenter();
+                    int rgbDiff = Math.Abs(dry.r - withOcean.r) + Math.Abs(dry.g - withOcean.g) + Math.Abs(dry.b - withOcean.b);
+                    Debug.Log($"World shoreline | XZ ({point.X:F2}, {point.Z:F2}) | center pixel {dry} -> {withOcean}");
+                    return rgbDiff > 3;
+                }
+                finally
+                {
+                    RenderTexture.active = previous;
+                    Destroy(pixel);
+                }
+
+                Color32 ReadCenter()
+                {
+                    Render();
+                    RenderTexture.active = target;
+                    pixel.ReadPixels(new Rect(target.width / 2, target.height / 2, 1, 1), 0, 0, false);
+                    return pixel.GetPixel(0, 0);
+                }
+            }
+        }
+
+        private IEnumerator MeasureControls(RenderTexture target)
+        {
+            // Drive the same frame handler as the normal player and render the resulting movement.
+            player.ProcessInput(default, Step, focused: true);
+            player.ProcessInput(new ExplorerInput { Destination = Key.F1 }, Step, focused: true);
+            if (!Check(player.MoveMode == ExplorerMoveMode.Swim, "controls sea arrival"))
+                yield break;
+            player.ProcessInput(default, Step, focused: true);
+            player.Look(0f, 24f);
+            yield return WarmWorld(80);
+            int limits = player.LimitedMoves;
+            yield return Measure("Controls surface swim", 90, _ => player.ProcessInput(
+                new ExplorerInput { Steer = true, Forward = 1f }, Step, focused: true), viewUpdatedByDrive: true);
+            if (!Check(!player.IsDiving && Math.Abs(player.WorldFeet.Y + ContinentExplorer.SurfaceSwimDepth) < 0.02d,
+                "controls shallow pitch holds the water surface"))
+                yield break;
+            CaptureIfRequested(target, "surface-swim");
+            float surfaceRange = view.farClipPlane;
+            player.Look(0f, 40f);
+            yield return Measure("Controls pitched dive", 180, _ => player.ProcessInput(
+                new ExplorerInput { Steer = true, Forward = 1f }, Step, focused: true), viewUpdatedByDrive: true);
+            if (!Check(player.WorldFeet.Y < -10d && terrain.IsWater(view.transform.position), "controls diver and camera submerged"))
+                yield break;
+            float coastHeading = terrain.Landforms == null ? 0f : 90f;
+            player.Look(coastHeading, -17f);
+            if (!Check(player.Environment.UnderwaterEffectsActive && view.clearFlags == CameraClearFlags.Skybox
+                && Mathf.Abs(view.farClipPlane - surfaceRange) < 0.02f, "controls underwater outdoor view"))
+                yield break;
+            Debug.Log(FormattableString.Invariant($"World controls | surface far clip {surfaceRange:F0} m | underwater far clip {view.farClipPlane:F0} m"));
+            Render();
+            CaptureIfRequested(target, "underwater-looks-out");
+            player.Look(coastHeading, 3f);
+            Render();
+            CaptureIfRequested(target, "underwater-distance");
+            yield return Measure("Controls rise and float", 240, _ => player.ProcessInput(
+                new ExplorerInput { Rise = true }, Step, focused: true), viewUpdatedByDrive: true);
+            if (!Check(Math.Abs(player.WorldFeet.Y + ContinentExplorer.SurfaceSwimDepth) < 0.02d && player.MoveMode == ExplorerMoveMode.Swim
+                && !player.IsDiving && !player.Environment.UnderwaterEffectsActive,
+                "controls stable water surface"))
+                yield break;
+
+            if (terrain.Landforms?.Size == 64000 && terrain.Seed == 20261121)
+            {
+                // Downstream section of the photographed southern creek.
+                var river = new WorldPosition(1028d, 0d, -42392d);
+                if (!Check(terrain.TryGetWaterColumn(river, out float riverLevel, out float bed)
+                    && player.EnterAt(new WorldPosition(river.X, bed + 0.55d, river.Z))
+                    && player.MoveMode == ExplorerMoveMode.Swim, "controls riverbed arrival"))
+                    yield break;
+                player.Look(180f, 24f);
+                for (int i = 0; i < 90; i++)
+                {
+                    player.ProcessInput(new ExplorerInput { Descend = true }, Step, focused: true);
+                    Render();
+                    yield return null;
+                }
+                if (!Check(player.IsDiving && player.WorldFeet.Y - bed < 0.32d, "controls riverbed collision"))
+                    yield break;
+                Debug.Log(FormattableString.Invariant($"World controls | river level {riverLevel:F3} m | bed {bed:F3} m | reference Y {player.WorldFeet.Y:F3}"));
+                CaptureIfRequested(target, "river-bed");
+            }
+
+            if (!Check(player.EnterAt(terrain.MountainOverview), "controls flight arrival"))
+                yield break;
+            player.Look(0f, 65f);
+            yield return WarmWorld(80);
+            double altitude = player.WorldFeet.Y;
+            player.ProcessInput(new ExplorerInput { ToggleFlight = true }, Step, focused: true);
+            yield return Measure("Controls sprint dive and turn", 240, i => player.ProcessInput(
+                new ExplorerInput { Steer = true, Forward = 1f, Run = true, Look = i == 120 ? new Vector2(562.5f, 0f) : default },
+                Step, focused: true), viewUpdatedByDrive: true);
+            if (!Check(player.WorldFeet.Y < altitude - 57d && player.WorldFeet.X > terrain.MountainOverview.X + 10d
+                && player.LimitedMoves == limits, "controls angled flight follows steering without streaming stops"))
+                yield break;
+            player.ProcessInput(default, Step, focused: true);
+            Debug.Log("World controls | water and flight routes passed");
+            Application.Quit(0);
+        }
+
         private IEnumerator CaptureExpansion(RenderTexture target)
         {
             WorldEnvironment environment = player.Environment;
@@ -173,12 +419,14 @@ namespace Reol2.World
             AdvanceForCapture(6 * WorldClock.Hour);
             yield return WarmWorld(45);
             CaptureIfRequested(target, "coast-night");
-            if (!Check(player.EnterAt(terrain.OceanEntry), "expansion dive arrival"))
+            WorldPosition sea = terrain.OceanEntry;
+            if (!Check(player.EnterAt(new WorldPosition(sea.X, -6f, sea.Z)), "expansion dive arrival"))
                 yield break;
             player.Look(22f, -25f);
             yield return WarmWorld(75);
             CaptureIfRequested(target, "underwater");
-            if (!Check(environment.ActivePrecipitation == 0, "sheltered from precipitation"))
+            if (!Check(environment.UnderwaterEffectsActive && environment.ActivePrecipitation == 0,
+                "underwater view sheltered from precipitation"))
                 yield break;
             AdvanceForCapture(10 * WorldClock.Hour);
             if (!Check(player.EnterAt(terrain.MountainOverview), "expansion mountaintop arrival"))
@@ -593,7 +841,7 @@ namespace Reol2.World
             player.MoveForFrame(Vector2.up, lift, true, true, step);
         }
 
-        private IEnumerator Measure(string route, int count, Action<int> drive)
+        private IEnumerator Measure(string route, int count, Action<int> drive, bool viewUpdatedByDrive = false)
         {
             var frames = new double[count];
             var stream = new double[count];
@@ -653,7 +901,8 @@ namespace Reol2.World
                 peakCaveTiles = Math.Max(peakCaveTiles, terrain.CaveTiles);
                 if (i % 60 == 0 || i == count - 1)
                     peakMemory = Math.Max(peakMemory, Profiler.GetTotalAllocatedMemoryLong());
-                player.UpdateView();
+                if (!viewUpdatedByDrive)
+                    player.UpdateView();
                 if (gpu != null)
                     FrameTimingManager.CaptureFrameTimings();
                 Render();
@@ -723,6 +972,14 @@ namespace Reol2.World
             if (index < 0 || index + 1 >= args.Length)
                 return;
 
+            string output = args[index + 1];
+            if (suffix != null)
+                output = Path.ChangeExtension(output, null) + "-" + suffix + ".png";
+            File.WriteAllBytes(output, EncodeFrame(target));
+        }
+
+        private static byte[] EncodeFrame(RenderTexture target)
+        {
             var capture = new Texture2D(target.width, target.height, TextureFormat.RGB24, false);
             RenderTexture previous = RenderTexture.active;
             try
@@ -730,10 +987,7 @@ namespace Reol2.World
                 RenderTexture.active = target;
                 capture.ReadPixels(new Rect(0, 0, target.width, target.height), 0, 0);
                 capture.Apply();
-                string output = args[index + 1];
-                if (suffix != null)
-                    output = Path.ChangeExtension(output, null) + "-" + suffix + ".png";
-                File.WriteAllBytes(output, capture.EncodeToPNG());
+                return capture.EncodeToPNG();
             }
             finally
             {

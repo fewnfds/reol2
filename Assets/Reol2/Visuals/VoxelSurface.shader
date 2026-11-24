@@ -123,7 +123,8 @@ Shader "Reol2/Voxel Surface"
                 #if defined(_MAIN_LIGHT_SHADOWS_CASCADE)
                     input.shadowCoord = TransformWorldToShadowCoord(input.positionWS);
                 #endif
-                Light sun = GetMainLight(input.shadowCoord);
+                // Use URP's distance fade so fragments beyond the shadow cascades stay lit.
+                Light sun = GetMainLight(input.shadowCoord, input.positionWS, half4(1, 1, 1, 1));
                 half diffuse = saturate(dot(normal, sun.direction));
                 half3 ambient = lerp(half3(0.32, 0.35, 0.31), half3(0.55, 0.63, 0.60), normal.y * 0.5 + 0.5);
                 ambient *= _ReolSkyDaylight > 0.0 ? _ReolSkyDaylight : 1.0;
@@ -134,9 +135,12 @@ Shader "Reol2/Voxel Surface"
                     // The same surface location receives the same fine tone across render proxies.
                     float2 p = (input.positionWS.xz + input.positionWS.y * float2(0.34, -0.18)) * 0.125;
                     float2 footprint = fwidth(p);
-                    float distanceToEye = distance(GetCameraPositionWS(), input.positionWS);
+                    float3 toEye = GetCameraPositionWS() - input.positionWS;
+                    float distanceToEye = length(toEye);
+                    float facing = saturate(dot(normal, toEye) / max(distanceToEye, 0.001));
                     float strength = (1.0 - smoothstep(0.15, 0.6, max(footprint.x, footprint.y)))
-                        * (1.0 - smoothstep(55.0, 260.0, distanceToEye));
+                        * (1.0 - smoothstep(55.0, 260.0, distanceToEye))
+                        * smoothstep(0.12, 0.42, facing);
                     if (strength > 0.0)
                     {
                         float2 origin = _ReolGroundOrigin.xy;

@@ -6,19 +6,38 @@ namespace Reol2.World
 {
     internal sealed class WorldInlandWater
     {
+        private static readonly int WaterOrigin = Shader.PropertyToID("_WaterOrigin");
         private readonly Mesh mesh;
         private readonly MeshRenderer renderer;
         private readonly Vector2Int center;
+        private readonly MaterialPropertyBlock ripples = new();
 
         internal WorldInlandWater(Transform parent, WorldSurface surface, Material material)
         {
             center = surface.Center;
+            Build(surface, out Vector3[] vertices, out int[] indices);
+
+            var obj = new GameObject("River and basin water", typeof(MeshFilter), typeof(MeshRenderer));
+            obj.transform.SetParent(parent, false);
+            mesh = new Mesh { name = "Main river and lake" };
+            if (vertices.Length > ushort.MaxValue)
+                mesh.indexFormat = IndexFormat.UInt32;
+            mesh.vertices = vertices;
+            mesh.triangles = indices;
+            obj.GetComponent<MeshFilter>().sharedMesh = mesh;
+            renderer = obj.GetComponent<MeshRenderer>();
+            renderer.sharedMaterial = material;
+            renderer.shadowCastingMode = ShadowCastingMode.Off;
+        }
+
+        private static void Build(WorldSurface surface, out Vector3[] vertices, out int[] indices)
+        {
             const int lakeSides = 96;
             const int riverStep = 64;
             int rows = (WorldSurface.RiverHead - WorldSurface.RiverEnd) / riverStep + 1;
             int riverVertices = rows * 2;
-            var vertices = new Vector3[riverVertices + lakeSides + 1];
-            var indices = new int[(rows - 1) * 6 + lakeSides * 3];
+            vertices = new Vector3[riverVertices + lakeSides + 1];
+            indices = new int[(rows - 1) * 6 + lakeSides * 3];
             int write = 0;
             for (int row = 0; row < rows; row++)
             {
@@ -42,22 +61,14 @@ namespace Reol2.World
                 indices[write++] = riverVertices + (i + 1) % lakeSides + 1;
                 indices[write++] = riverVertices + i + 1;
             }
-
-            var obj = new GameObject("River and basin water", typeof(MeshFilter), typeof(MeshRenderer));
-            obj.transform.SetParent(parent, false);
-            mesh = new Mesh { name = "Main river and lake" };
-            mesh.vertices = vertices;
-            mesh.triangles = indices;
-            obj.GetComponent<MeshFilter>().sharedMesh = mesh;
-            renderer = obj.GetComponent<MeshRenderer>();
-            renderer.sharedMaterial = material;
-            renderer.shadowCastingMode = ShadowCastingMode.Off;
         }
 
-        internal void Place(WorldFrame frame) => renderer.transform.localPosition =
-            (Vector3)(new Vector3Int(center.x, 0, center.y) - frame.Origin);
-
-        internal void SetRipples(MaterialPropertyBlock props) => renderer.SetPropertyBlock(props);
+        internal void Place(WorldFrame frame)
+        {
+            renderer.transform.localPosition = (Vector3)(new Vector3Int(center.x, 0, center.y) - frame.Origin);
+            ripples.SetVector(WaterOrigin, new Vector4(frame.Origin.x / 128, frame.Origin.z / 128, 0, 0));
+            renderer.SetPropertyBlock(ripples);
+        }
         internal void Release() => Object.Destroy(mesh);
     }
 }

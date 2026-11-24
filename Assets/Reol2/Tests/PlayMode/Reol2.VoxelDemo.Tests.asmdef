@@ -1,6 +1,6 @@
 {
     "name": "Reol2.VoxelDemo.Tests",
     "rootNamespace": "Reol2.Tests",
-    "references": ["Reol2.VoxelDemo"],
+    "references": ["Reol2.VoxelDemo", "Unity.InputSystem", "Unity.InputSystem.TestFramework"],
     "optionalUnityReferences": ["TestAssemblies"]
 }

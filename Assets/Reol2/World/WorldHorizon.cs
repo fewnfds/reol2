@@ -15,12 +15,14 @@ namespace Reol2.World
         private const int CoverageSize = 16;
         private const int MaximumTiles = 224;
         private const int SelectionLimit = 176;
+        private const int RegionalCellsPerSlice = 32;
         private const int GridVertices = (Grid + 1) * (Grid + 1);
         private const int VertexCount = GridVertices + 4 * (Grid + 1);
         private static readonly int MaskTexture = Shader.PropertyToID("_ResidentTerrain");
         private static readonly int MaskOrigin = Shader.PropertyToID("_ResidentTerrainOrigin");
         private static readonly int CaveCoverageTexture = Shader.PropertyToID("_CaveCoverage");
         private static readonly int CaveCoverageBounds = Shader.PropertyToID("_CaveCoverageBounds");
+        private static readonly int WaterOrigin = Shader.PropertyToID("_WaterOrigin");
         private static readonly int[] Indices = CreateIndices();
 
         private readonly ContinentField field;
@@ -28,6 +30,9 @@ namespace Reol2.World
         private readonly Material material;
         private readonly Material residentMaterial;
         private readonly Material caveMaterial;
+        private readonly OceanSurface ocean;
+        private readonly RegionalSurfaceTile regionalSurface;
+        private readonly Material regionalWater;
         private readonly Texture3D coverage;
         private readonly byte[] coverageData = new byte[CoverageSize * CoverageSize * CoverageSize];
         private readonly Vector3[] vertices = new Vector3[VertexCount];
@@ -45,21 +50,47 @@ namespace Reol2.World
         private readonly HashSet<TileKey> previouslyVisible = new(SelectionLimit);
         private bool haveSelection;
         private bool haveCoverage;
+        private bool sharedWaterDirty;
         private int next;
         private int revision;
+        private bool buildingRegional;
+        private bool regionalPrepared;
+        private int regionalEmitted;
+        private int regionalStartedAt;
+        private TileKey regionalKey;
         private WorldPosition focusAtSelection;
 
         internal int ResidentTiles => tiles.Count;
+        internal int PendingTiles => queue.Count - next + (buildingRegional ? 1 : 0);
+        internal int RegionalTilesBuilt { get; private set; }
+        internal int RegionalCellVisits { get; private set; }
+        internal int LongestRegionalTileBuild { get; private set; }
+        internal int SharedInlandWaterTriangles { get; private set; }
         internal Material ResidentMaterial => residentMaterial;
         internal Material CaveMaterial => caveMaterial;
-        internal int VisibleTriangles => visible.Count * (Indices.Length / 3);
+        internal int VisibleTriangles
+        {
+            get
+            {
+                int count = 0;
+                foreach (TileKey key in visible)
+                    count += tiles[key].Triangles;
+                return count;
+            }
+        }
         internal Vector3Int CoverageCenter { get; private set; }
 
-        internal WorldHorizon(Transform parent, ContinentField field, Material source)
+        internal WorldHorizon(Transform parent, ContinentField field, Material source, OceanSurface ocean, Material water)
         {
             this.field = field;
+            this.ocean = ocean;
             root = new GameObject("Streamed land and seabed").transform;
             root.SetParent(parent, false);
+            if (field.Surface.HasWaterTiles)
+            {
+                regionalSurface = new RegionalSurfaceTile(field);
+                regionalWater = new Material(water);
+            }
             material = new Material(source);
             material.EnableKeyword("REOL_HEIGHT_PROXY");
             material.SetShaderPassEnabled("DepthOnly", false);
@@ -102,7 +133,7 @@ namespace Reol2.World
             PlaceCoverage(min, frame);
         }
 
-        internal void Stream(WorldPosition focus, WorldFrame frame, bool entry, double budgetMs)
+        internal void Stream(WorldPosition focus, WorldFrame frame, bool entry, double budgetMs, float range)
         {
             bool moved = !haveSelection || Math.Abs(focus.X - focusAtSelection.X) >= 48
                 || Math.Abs(focus.Z - focusAtSelection.Z) >= 48 || Math.Abs(focus.Y - focusAtSelection.Y) >= 32;
@@ -110,34 +141,81 @@ namespace Reol2.World
             if (changed)
             {
                 focusAtSelection = focus;
-                Select(focus);
+                Select(focus, range);
                 haveSelection = true;
                 if (entry)
-                    UpdateVisible();
+                    UpdateVisible(frame);
             }
+            if (buildingRegional && changed && !desired.Contains(regionalKey))
+                buildingRegional = false;
 
             long started = Stopwatch.GetTimestamp();
             int limit = entry ? 12 : budgetMs > 0 ? 2 : 0;
-            for (int i = 0; i < limit && next < queue.Count; i++)
+            int completed = 0;
+            while (completed < limit && (buildingRegional || next < queue.Count))
             {
-                if (tiles.Count == MaximumTiles && !RecycleOldest())
-                    break;
-                TileKey pending = queue[next++].Key;
-                if (!tiles.ContainsKey(pending))
-                    Build(pending, frame);
-                changed = true;
-                if (!entry && (Stopwatch.GetTimestamp() - started) * (1000d / Stopwatch.Frequency) >= budgetMs)
+                if (buildingRegional)
+                {
+                    if (!regionalPrepared)
+                        regionalPrepared = regionalSurface.Prepare(RegionalCellsPerSlice);
+                    else
+                    {
+                        regionalSurface.Emit(regionalEmitted, RegionalCellsPerSlice);
+                        regionalEmitted += RegionalCellsPerSlice;
+                    }
+                    if (regionalPrepared && regionalEmitted >= regionalSurface.CellCount)
+                    {
+                        if (tiles.Count == MaximumTiles && !RecycleOldest())
+                            break;
+                        PublishTile(regionalKey, frame, regional: true);
+                        RegionalTilesBuilt++;
+                        RegionalCellVisits += regionalSurface.CellVisits;
+                        LongestRegionalTileBuild = Math.Max(LongestRegionalTileBuild, Time.frameCount - regionalStartedAt);
+                        buildingRegional = false;
+                        completed++;
+                        changed = true;
+                    }
+                }
+                else
+                {
+                    TileKey tile = queue[next++].Key;
+                    if (tiles.ContainsKey(tile))
+                        continue;
+                    int step = tile.Width / Grid;
+                    if (regionalSurface != null && field.Surface.WaterFeaturesIn(tile.X, tile.Z, tile.Width) != WaterFeatures.None)
+                    {
+                        regionalKey = tile;
+                        regionalSurface.Begin(tile.X, tile.Z, step, Grid);
+                        regionalPrepared = false;
+                        regionalEmitted = 0;
+                        regionalStartedAt = Time.frameCount;
+                        buildingRegional = true;
+                    }
+                    else
+                    {
+                        if (tiles.Count == MaximumTiles && !RecycleOldest())
+                        {
+                            next--;
+                            break;
+                        }
+                        PublishTile(tile, frame, regional: false);
+                        completed++;
+                        changed = true;
+                    }
+                }
+                if ((Stopwatch.GetTimestamp() - started) * (1000d / Stopwatch.Frequency) >= budgetMs
+                    && (!entry || regionalSurface != null && (visible.Count > 0 || completed > 0)))
                     break;
             }
 
             if (changed)
-                UpdateVisible();
+                UpdateVisible(frame);
         }
 
-        private void Select(WorldPosition focus)
+        private void Select(WorldPosition focus, float range)
         {
             const int rootWidth = BaseWidth << RootLevel;
-            float radius = ContinentTerrain.HorizonDistance(focus.Y) * 1.08f;
+            float radius = range * 1.08f;
             int x0 = MinimumRoot(focus.X - radius, rootWidth);
             int z0 = MinimumRoot(focus.Z - radius, rootWidth);
             int x1 = MinimumRoot(focus.X + radius, rootWidth);
@@ -159,8 +237,13 @@ namespace Reol2.World
             while (refinements.Count > 0 && desired.Count + 4 <= SelectionLimit)
             {
                 Request choice = TakeRefinement();
+                // Build complete child groups near the player while the distant
+                // groups still have their parent mesh. Each ancestor comes first.
+                float buildPriority = regionalSurface != null
+                    ? (float)Math.Sqrt(HorizontalDistanceSquared(choice.Key, focus)) - choice.Key.Level
+                    : choice.Priority - choice.Key.Level * 2f;
                 for (int i = 0; i < 4; i++)
-                    SelectTile(choice.Key.Child(i), focus, radius, choice.Priority - choice.Key.Level * 2f);
+                    SelectTile(choice.Key.Child(i), focus, radius, buildPriority);
             }
             queue.Sort();
         }
@@ -175,9 +258,7 @@ namespace Reol2.World
             if (tile.Level == 0)
                 return;
             float wide = tile.Width;
-            double dx = Math.Max(0, Math.Max(tile.X - focus.X, focus.X - (tile.X + wide)));
-            double dz = Math.Max(0, Math.Max(tile.Z - focus.Z, focus.Z - (tile.Z + wide)));
-            double horizontal = dx * dx + dz * dz;
+            double horizontal = HorizontalDistanceSquared(tile, focus);
             float max = Math.Min(radius, wide * 1.15f);
             if (horizontal > max * (double)max)
                 return;
@@ -205,6 +286,13 @@ namespace Reol2.World
             refinements[index] = candidate;
         }
 
+        private static double HorizontalDistanceSquared(TileKey tile, WorldPosition focus)
+        {
+            double dx = Math.Max(0, Math.Max(tile.X - focus.X, focus.X - (tile.X + tile.Width)));
+            double dz = Math.Max(0, Math.Max(tile.Z - focus.Z, focus.Z - (tile.Z + tile.Width)));
+            return dx * dx + dz * dz;
+        }
+
         private Request TakeRefinement()
         {
             Request first = refinements[0];
@@ -228,7 +316,7 @@ namespace Reol2.World
             return first;
         }
 
-        private void UpdateVisible()
+        private void UpdateVisible(WorldFrame frame)
         {
             previouslyVisible.Clear();
             previouslyVisible.UnionWith(visible);
@@ -237,10 +325,46 @@ namespace Reol2.World
                 AddVisible(key);
             foreach (TileKey key in previouslyVisible)
                 if (!visible.Contains(key) && tiles.TryGetValue(key, out Tile old))
-                    old.Renderer.enabled = false;
+                {
+                    old.Show(false);
+                    sharedWaterDirty |= old.SharedWaterLevel.HasValue;
+                }
             foreach (TileKey key in visible)
                 if (!previouslyVisible.Contains(key))
-                    tiles[key].Renderer.enabled = true;
+                {
+                    Tile tile = tiles[key];
+                    tile.Show(true);
+                    sharedWaterDirty |= tile.SharedWaterLevel.HasValue;
+                }
+            if (sharedWaterDirty)
+                PublishSharedWater(frame);
+        }
+
+        private void PublishSharedWater(WorldFrame frame)
+        {
+            sharedWaterDirty = false;
+            SharedInlandWaterTriangles = 0;
+            List<Vector3> output = ocean.Vertices;
+            output.Clear();
+            foreach (TileKey key in visible)
+            {
+                Tile tile = tiles[key];
+                if (tile.SharedWaterLevel is not float level)
+                    continue;
+                int x = key.X - frame.Origin.x, z = key.Z - frame.Origin.z;
+                if (tile.Shore == null || tile.Shore.Count == 0)
+                {
+                    OceanSurface.AppendQuad(output, x, z, x + key.Width, z + key.Width, level);
+                    SharedInlandWaterTriangles += level == 0f ? 0 : 2;
+                }
+                else
+                {
+                    var offset = new Vector3(x, 0, z);
+                    foreach (Vector3 vertex in tile.Shore)
+                        output.Add(offset + vertex);
+                }
+            }
+            ocean.Publish(frame);
         }
 
         private void AddVisible(TileKey key)
@@ -280,17 +404,39 @@ namespace Reol2.World
             }
             if (victim == null)
                 return false;
-            victim.Renderer.enabled = false;
-            visible.Remove(selected);
+            victim.Show(false);
+            if (visible.Remove(selected))
+                sharedWaterDirty |= victim.SharedWaterLevel.HasValue;
             spare.Push(victim);
             tiles.Remove(selected);
             return true;
         }
 
-        private void Build(TileKey key, WorldFrame frame)
+        private void PublishTile(TileKey key, WorldFrame frame, bool regional)
         {
             Tile tile = spare.Count > 0 ? spare.Pop() : new Tile(root, material);
             int step = key.Width / Grid;
+            if (regional)
+            {
+                tile.Elevation = regionalSurface.Publish(tile.Mesh);
+                tile.PublishRegionalWater(regionalSurface, regionalWater);
+                tile.SharedWaterLevel = regionalSurface.SharedWaterLevel;
+                tile.Shore?.Clear();
+                tile.HasIndices = false;
+            }
+            else
+            {
+                tile.HasRegionalWater = false;
+                BuildRegular(tile, key, step);
+            }
+            tile.Triangles = (int)tile.Mesh.GetIndexCount(0) / 3;
+            tile.LastUse = revision;
+            tile.Place(key, frame);
+            tiles.Add(key, tile);
+        }
+
+        private void BuildRegular(Tile tile, TileKey key, int step)
+        {
             const int row = Grid + 3;
             for (int z = 0; z < row; z++)
             for (int x = 0; x < row; x++)
@@ -326,6 +472,8 @@ namespace Reol2.World
                 skirtOffsets[bottom] = new Vector2(skirt, 0);
             }
 
+            if (!tile.HasIndices)
+                tile.Mesh.Clear(keepVertexLayout: true);
             tile.Mesh.SetVertices(vertices);
             tile.Mesh.SetNormals(normals);
             tile.Mesh.SetColors(colors);
@@ -338,14 +486,22 @@ namespace Reol2.World
             float half = key.Width * 0.5f;
             tile.Mesh.bounds = new Bounds(new Vector3(half, (high + low - skirt) / 2f, half),
                 new Vector3(key.Width, high - low + skirt, key.Width));
+            bool hasSea = low + baseHeight < 0f && (regionalSurface == null
+                || field.Surface.NearConnectedSea(key.X + half, key.Z + half));
+            tile.SharedWaterLevel = hasSea ? 0f : null;
+            tile.Shore?.Clear();
+            if (hasSea && high + baseHeight >= 0f)
+            {
+                tile.Shore ??= new List<Vector3>();
+                OceanSurface.AppendShore(tile.Shore, heights, row, row + 1, Grid, step);
+            }
             tile.Elevation = (int)baseHeight;
-            tile.LastUse = revision;
-            tile.Place(key, frame);
-            tiles.Add(key, tile);
         }
 
         internal void Reposition(WorldFrame frame)
         {
+            if (regionalWater != null)
+                regionalWater.SetVector(WaterOrigin, new Vector4(frame.Origin.x / 128, frame.Origin.z / 128, 0, 0));
             foreach (var pair in tiles)
                 pair.Value.Place(pair.Key, frame);
             if (haveCoverage)
@@ -370,16 +526,29 @@ namespace Reol2.World
             return -1;
         }
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
+        internal WorldRenderReport.TileState[] ReportVisibleTiles(WorldFrame frame)
+        {
+            var result = new WorldRenderReport.TileState[visible.Count];
+            int index = 0;
+            foreach (TileKey key in visible)
+                result[index++] = tiles[key].Report(key, frame);
+            return result;
+        }
+#endif
+
         internal void Release()
         {
             foreach (Tile tile in tiles.Values)
-                Object.Destroy(tile.Mesh);
+                tile.Release();
             foreach (Tile tile in spare)
-                Object.Destroy(tile.Mesh);
+                tile.Release();
             Object.Destroy(coverage);
             Object.Destroy(material);
             Object.Destroy(residentMaterial);
             Object.Destroy(caveMaterial);
+            if (regionalWater != null)
+                Object.Destroy(regionalWater);
         }
 
         private static int MinimumRoot(double coordinate, int width) =>
@@ -447,20 +616,26 @@ namespace Reol2.World
         {
             private readonly Transform transform;
             internal readonly Mesh Mesh;
-            internal readonly MeshRenderer Renderer;
+            private readonly MeshRenderer renderer;
+            private Mesh water;
+            private MeshRenderer waterRenderer;
             internal int Elevation;
+            internal int Triangles;
             internal int LastUse;
             internal bool HasIndices;
+            internal float? SharedWaterLevel;
+            internal bool HasRegionalWater;
+            internal List<Vector3> Shore;
 
             internal Tile(Transform root, Material material)
             {
                 var obj = new GameObject("Horizon tile", typeof(MeshFilter), typeof(MeshRenderer));
                 transform = obj.transform;
                 transform.SetParent(root, false);
-                Renderer = obj.GetComponent<MeshRenderer>();
-                Renderer.sharedMaterial = material;
-                Renderer.shadowCastingMode = ShadowCastingMode.Off;
-                Renderer.enabled = false;
+                renderer = obj.GetComponent<MeshRenderer>();
+                renderer.sharedMaterial = material;
+                renderer.shadowCastingMode = ShadowCastingMode.Off;
+                renderer.enabled = false;
                 Mesh = new Mesh { name = "Streamed horizon surface" };
                 Mesh.MarkDynamic();
                 obj.GetComponent<MeshFilter>().sharedMesh = Mesh;
@@ -468,6 +643,59 @@ namespace Reol2.World
 
             internal void Place(TileKey key, WorldFrame frame) =>
                 transform.localPosition = (Vector3)(new Vector3Int(key.X, Elevation, key.Z) - frame.Origin);
+
+            internal void Show(bool show)
+            {
+                renderer.enabled = show;
+                if (waterRenderer != null)
+                    waterRenderer.enabled = show && HasRegionalWater;
+            }
+
+            internal void PublishRegionalWater(RegionalSurfaceTile surface, Material material)
+            {
+                HasRegionalWater = !surface.SharedWaterLevel.HasValue && surface.WaterVertexCount != 0;
+                if (!HasRegionalWater)
+                    return;
+                if (water == null)
+                {
+                    var obj = new GameObject("Water surface", typeof(MeshFilter), typeof(MeshRenderer));
+                    obj.transform.SetParent(transform, false);
+                    water = new Mesh { name = "Regional water surface", indexFormat = IndexFormat.UInt32 };
+                    water.MarkDynamic();
+                    obj.GetComponent<MeshFilter>().sharedMesh = water;
+                    waterRenderer = obj.GetComponent<MeshRenderer>();
+                    waterRenderer.sharedMaterial = material;
+                    waterRenderer.shadowCastingMode = ShadowCastingMode.Off;
+                    waterRenderer.enabled = false;
+                }
+                surface.PublishWater(water);
+            }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
+            internal WorldRenderReport.TileState Report(TileKey key, WorldFrame frame) => new()
+            {
+                x = key.X,
+                z = key.Z,
+                width = key.Width,
+                lod = key.Level,
+                terrainTriangles = Triangles,
+                terrainVisible = renderer.enabled,
+                minTerrainY = renderer.bounds.min.y + frame.Origin.y,
+                maxTerrainY = renderer.bounds.max.y + frame.Origin.y,
+                sharedSea = SharedWaterLevel == 0f,
+                sharedWaterLevel = SharedWaterLevel.GetValueOrDefault(),
+                clippedSeaTriangles = SharedWaterLevel == 0f ? (Shore?.Count ?? 0) / 3 : 0,
+                regionalWaterTriangles = waterRenderer != null && waterRenderer.enabled
+                    ? (int)water.GetIndexCount(0) / 3 : 0
+            };
+#endif
+
+            internal void Release()
+            {
+                Object.Destroy(Mesh);
+                if (water != null)
+                    Object.Destroy(water);
+            }
         }
     }
 }

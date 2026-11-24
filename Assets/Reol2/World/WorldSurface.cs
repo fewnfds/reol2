@@ -3,6 +3,15 @@ using UnityEngine;
 
 namespace Reol2.World
 {
+    internal interface IWorldSurfaceData
+    {
+        WorldPosition Spawn { get; }
+        WorldPosition SeaEntry { get; }
+        bool TryRead(int x, int z, out float ground, out float water);
+        WaterFeatures FeaturesIn(int x, int z, int width);
+        bool NearSea(double x, double z);
+    }
+
     internal sealed class WorldSurface
     {
         internal const float HighestTerrain = 9140f;
@@ -16,27 +25,92 @@ namespace Reol2.World
         internal const int RiverEnd = -110000;
         private const int Step = ContinentField.ChunkSize;
         private const int CacheMask = (1 << 15) - 1;
-        private readonly struct HeightNode
+        private readonly struct SurfaceNode
         {
             internal readonly ulong Key;
-            internal readonly float Value;
+            internal readonly float Ground, Water;
 
-            internal HeightNode(ulong key, float value)
+            internal SurfaceNode(ulong key, float ground, float water)
             {
                 Key = key;
-                Value = value;
+                Ground = ground;
+                Water = water;
             }
         }
 
-        private readonly HeightNode[] nodes = new HeightNode[CacheMask + 1];
+        private readonly SurfaceNode[] nodes = new SurfaceNode[CacheMask + 1];
         private readonly WorldDefinition world;
         private readonly WorldAtlas atlas;
-        internal Vector2Int Center => world.ContinentCenter;
+        private readonly IWorldSurfaceData data;
+        internal Vector2Int Center { get; }
+        internal RegionalLandforms Landforms { get; }
+        internal bool HasWaterTiles => Landforms != null || data != null;
 
-        internal WorldSurface(WorldDefinition world)
+        internal WorldSurface(WorldDefinition world, RegionalLandforms landforms = null, IWorldSurfaceData data = null)
         {
             this.world = world;
-            atlas = new WorldAtlas(world);
+            this.data = data;
+            Landforms = landforms;
+            Center = world.ContinentCenter;
+            if (landforms == null && data == null)
+                atlas = new WorldAtlas(world);
+            if (landforms != null)
+                Center = new Vector2Int(Center.x & -Step, Center.y & -Step);
+        }
+
+        internal WorldPosition Place(System.Numerics.Vector2 point, double height = 0d) =>
+            new(Center.x + (double)point.X, height, Center.y + (double)point.Y);
+
+        private System.Numerics.Vector2 RegionPoint(double x, double z) => new((float)(x - Center.x), (float)(z - Center.y));
+
+        internal WaterFeatures WaterFeaturesIn(int x, int z, int width) =>
+            Landforms == null ? data.FeaturesIn(x, z, width) : Landforms.WaterFeaturesIn(RegionPoint(x, z), width);
+
+        internal bool RiverIntersects(int x, int z, int width) => Landforms == null
+            ? (data.FeaturesIn(x, z, width) & WaterFeatures.River) != 0
+            : Landforms.Rivers.IntersectsChannel(RegionPoint(x + width * 0.5, z + width * 0.5), width * 0.707107f);
+
+        internal bool ValleyIntersects(int x, int z, int width) => Landforms == null
+            ? RiverIntersects(x, z, width)
+            : Landforms.Rivers.IntersectsValley(RegionPoint(x + width * 0.5, z + width * 0.5), width * 0.707107f);
+
+        internal bool TryRiverSpine(int x0, int z0, int x1, int z1, out System.Numerics.Vector2 local,
+            out float halfWidth, float margin = 0f)
+        {
+            local = default;
+            halfWidth = 0f;
+            return Landforms != null && Landforms.Rivers.TrySpine(RegionPoint(x0, z0), RegionPoint(x1, z1), out local, out halfWidth, margin);
+        }
+
+        internal bool NearConnectedSea(double x, double z) => Landforms == null
+            ? data?.NearSea(x, z) ?? true : Landforms.NearConnectedSea(RegionPoint(x, z));
+
+        internal float RegionalWaterNode(int x, int z, float ground)
+        {
+            SurfaceNode node = GetNode(x, z);
+            if (node.Ground == ground)
+                return node.Water;
+            if (data != null && data.TryRead(x, z, out _, out float water))
+                return water;
+            return Landforms?.WaterAt(RegionPoint(x, z), ground) ?? 0f;
+        }
+
+        internal void SampleNode(int x, int z, out float ground, out float water)
+        {
+            SurfaceNode node = GetNode(x, z);
+            ground = node.Ground;
+            water = node.Water;
+        }
+
+        internal float RiverWaterAt(double x, double z, float ground) =>
+            Landforms.Rivers.WaterAt(RegionPoint(x, z), ground, out _);
+
+        internal RegionalClimate? GeneratedClimateAt(WorldPosition point)
+        {
+            if (Landforms == null)
+                return null;
+            var local = RegionPoint(point.X, point.Z);
+            return Landforms.Contains(local) ? Landforms.ClimateAt(local) : null;
         }
 
         internal float HeightAt(double x, double z)
@@ -52,18 +126,27 @@ namespace Reol2.World
             ? a + (b - a) * u + (c - a) * v
             : d + (c - d) * (1f - u) + (b - d) * (1f - v);
 
-        internal float Node(int x, int z)
+        internal float Node(int x, int z) => GetNode(x, z).Ground;
+
+        private SurfaceNode GetNode(int x, int z)
         {
             x = Math.Clamp(x, -WorldDefinition.Extent, WorldDefinition.Extent);
             z = Math.Clamp(z, -WorldDefinition.Extent, WorldDefinition.Extent);
             ulong key = (1UL << 63) | ((ulong)(x + WorldDefinition.Extent) << 28) | (uint)(z + WorldDefinition.Extent);
             int slot = (int)(WorldNoise.Hash(x, z, 0) & CacheMask);
-            ref HeightNode cached = ref nodes[slot];
+            ref SurfaceNode cached = ref nodes[slot];
             if (cached.Key == key)
-                return cached.Value;
-            float height = Generate(x, z);
-            cached = new HeightNode(key, height);
-            return height;
+                return cached;
+            if (data != null && data.TryRead(x, z, out float ground, out float water))
+                cached = new SurfaceNode(key, ground, water);
+            else if (Landforms != null)
+            {
+                Landforms.Sample(RegionPoint(x, z), out ground, out water);
+                cached = new SurfaceNode(key, ground, water);
+            }
+            else
+                cached = new SurfaceNode(key, Generate(x, z), 0f);
+            return cached;
         }
 
         private float Generate(int x, int z)
@@ -121,6 +204,9 @@ namespace Reol2.World
 
         internal float WaterAt(double worldX, double worldZ)
         {
+            if (HasWaterTiles)
+                return RegionalWaterAt(worldX, worldZ);
+
             double east = worldX - Center.x;
             double north = worldZ - Center.y;
             float lake = LakeRadius((float)east, (float)north) <= 0.66f ? LakeLevel : 0f;
@@ -130,8 +216,30 @@ namespace Reol2.World
             return Math.Abs(east - river.x) <= river.z ? Math.Max(lake, river.y) : lake;
         }
 
+        private float RegionalWaterAt(double x, double z)
+        {
+            if (data == null && !Landforms.Contains(RegionPoint(x, z)))
+                return 0f;
+            int ix = (int)Math.Floor(x / Step) * Step, iz = (int)Math.Floor(z / Step) * Step;
+            float u = (float)((x - ix) / Step), v = (float)((z - iz) / Step);
+            float b = GetNode(ix + Step, iz).Water;
+            float c = GetNode(ix, iz + Step).Water;
+            if (u + v <= 1f)
+            {
+                float a = GetNode(ix, iz).Water;
+                return a + (b - a) * u + (c - a) * v;
+            }
+            float d = GetNode(ix + Step, iz + Step).Water;
+            return d + (c - d) * (1f - u) + (b - d) * (1f - v);
+        }
+
         internal WorldPosition FindDeepSea()
         {
+            if (Landforms != null)
+                return Place(new System.Numerics.Vector2(-Landforms.Size * 0.5f - 2000f, 0f), -1.35);
+            if (data != null)
+                return data.SeaEntry;
+
             const int spacing = 1 << 17;
             int bestX = -WorldDefinition.Extent + spacing;
             int bestZ = bestX;

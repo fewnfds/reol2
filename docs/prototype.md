@@ -1,59 +1,22 @@
-# 首个原型与验收
+# 双块体素原型
 
-大陆原型在同一套平滑采样基础上验证远景、三轴流送、跨区挖填和潜水。见[大陆试玩与基准](continent-demo.md)和[当前世界引擎方案](roadmap/world-engine.md)。
+双块场景是平滑挖填和角色运动的最小对照。两个相邻区块构成缓坡和岩洞，按一米整数格编辑，密度采样间距 0.5 米。Marching Cubes 构建可见面和碰撞。跨边界编辑时相邻块读取同一组密度样本。[测试入口](../Assets/Reol2/Tests/PlayMode/VoxelDemoTests.cs) · [大陆对照](continent-demo.md)
 
 ## 试玩
 
-本机可以直接打开 `Builds/VoxelDemo/Reol2VoxelDemo.exe`，运行时需要同目录的游戏数据文件。在 Unity 打开 `Assets/Scenes/VoxelDemo.unity` 后也可以进入 Play Mode。用 `Reol 2 > Build Windows Demo` 重建 Windows 开发版。
+Unity 菜单选 `Reol 2 → Open Voxel Demo`，运行 `Assets/Scenes/VoxelDemo.unity`。Windows 本地构建从 `Reol 2 → Build Windows Demo` 生成 `Builds/VoxelDemo/Reol2VoxelDemo.exe`。
 
 | 操作 | 按键 |
 | --- | --- |
 | 行走、看向目标 | WASD、鼠标 |
+| 跳跃 | `Space` |
 | 挖土、填土 | 左键、右键 |
-| 重置地形并回到起点 | R |
-| 释放鼠标 | Esc |
+| 重置地形并回到起点 | `R` |
+| 释放鼠标 | `Esc` |
+| 移动速度翻倍、减半 | `=`、`-`，或释放鼠标后点 HUD |
 
-沿路灯走上缓坡，挖开两盏灯之间的岩壁，从脚下到头顶清出通道。要堵回去，退出通道、往后退几步，再对准洞口地面填土。金色线框标出挖掘格，填土位置在另一格时用绿色线框显示。填土时会为角色留出安全余量。路头有一小块固定地形，角色越界后回到那里。
-
-## 首轮验证角色移动与体素挖放
-
-两个相邻区块构成一段缓坡和一间小岩洞。原型按 1 米整数格编辑，密度采样间隔为 0.5 米，每区块有 16³ 个构网单元。区块数量、尺度和地图布局均为试验设置。[游戏简报](preproduction/brief-reol2-2026-11-21/brief.md)
-
-- **角色移动。** 项目已有的 Input System 提供移动与视角输入。Unity `CharacterController` 以体素曲面碰撞为支撑。Play Mode 测试走通了上坡、挖开、通过、填回和受阻，也检查了挖掉脚下支撑后角色下落。[Unity 6.3 CharacterController.Move](https://docs.unity3d.com/6000.3/Documentation/ScriptReference/CharacterController.Move.html)
-- **地形编辑。** 区块共用密度采样。Marching Cubes 沿网格边复用顶点，编辑只重建依赖发生变化采样的区块。受影响的画面和碰撞在同一帧切换。填出的曲面可略越过格界，瞄准凸出的部分时仍能挖到对应的格子。Play Mode 覆盖了填土后的再次选格、负坐标、连续挖填后的接缝、角色占用时拒绝填土，以及路头保持可站立。[平滑体素地形研究](preproduction/smooth-voxel-terrain.md)
+沿路灯走上缓坡，挖开灯之间的岩壁并穿过。退出通道后再填回。瞄准框显示挖掘与填放目标，角色占用检查保护身体空间，路头地面保持可站立。[原型控制与编辑](../Assets/Reol2/Demo/VoxelDemoPlayer.cs)
 
 ## 性能测试
 
-Windows 开发构建支持 `-voxel-benchmark`。预热后采集 100 个静止帧，再对区块接缝的同一格交替挖填 100 次，每次更新两个区块。每帧离屏渲染一次，最后从 GPU 读回像素确认场景已经渲染。
-
-```powershell
-& '.\Builds\VoxelDemo\Reol2VoxelDemo.exe' -voxel-benchmark -screen-width 1280 -screen-height 720 -screen-fullscreen 0 -logFile 'H:\reol2\Logs\VoxelDemoBenchmark.log'
-```
-
-本机使用 i5-13600KF、RTX 3060、D3D12，分辨率 1280 × 720。以下是一次 100 样本的结果，单位为毫秒。
-
-| 指标 | P50 | P99 | 最大值 |
-| --- | ---: | ---: | ---: |
-| 静止帧 | 0.777 | 1.367 | 3.997 |
-| 编辑帧 | 2.618 | 5.016 | 5.770 |
-| 发起编辑到碰撞生效 | 1.623 | 1.907 | 1.924 |
-| 构网 | 0.773 | 0.857 | 0.867 |
-| Mesh 上传 | 0.029 | 0.050 | 0.066 |
-| 碰撞烘焙 | 0.789 | 0.966 | 1.005 |
-| 替换画面和碰撞 | 0.020 | 0.034 | 0.038 |
-
-100 次挖填的主线程托管分配共 0 B。帧时对应离屏场景，大世界加载和世界演算需要独立基准。
-
-## 运矿路线候选
-
-用来验证可改地形与居民工作的联动。
-
-下面是早期草案。后续实施以现有平滑密度采样和可通行支持面为起点，具体任务与验收见[地形与矿工开发计划](roadmap/foundation.md)。
-
-### 三分钟的玩家体验
-
-玩家从第三人称观察一名外门弟子在现成的小据点里采灵矿、运回工坊。玩家可以挖掉几块路面或在路上放方块。弟子发现当前路线受阻后改道，无路时保留工作并显示受阻。玩家在另一处铺回通路，弟子能继续送货。保存并重新进入场景后，方块改动、弟子位置、手上的货物和工序都能接续。
-
-这个练习用于验证 Reol 的自主生活系统能否与可改地形产生玩家看得懂的后果。矿石和工坊是原型用例，数值、地图范围和居民规模都可以在测试后调整。
-
-本机顾问参与了原型构思。验收以实际的 Play Mode、测试结果和性能采样为准。
+Windows 本地试玩加 `-voxel-benchmark`，预热后采集静止和跨块挖填，每帧离屏渲染，并检查 GPU 图像读回。场景用例覆盖接缝、负坐标、占用保护和改动后的碰撞。[开发工具](development.md) · [双块阶段实测](H:/reol2-workbench/goals-old/world-prototype/goal-01-smooth-voxel.md)

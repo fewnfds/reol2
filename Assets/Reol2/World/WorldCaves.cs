@@ -26,6 +26,12 @@ namespace Reol2.World
             this.surface = surface;
             int east = (world.ContinentCenter.x + 16384) & ~4095;
             int north = world.ContinentCenter.y - 4096;
+            if (surface.Landforms is RegionalLandforms landforms)
+            {
+                WorldPosition peak = surface.Place(landforms.Peak);
+                east = peak.Cell.x;
+                north = peak.Cell.z;
+            }
             var passage = new List<WorldPosition>(9);
             Primary = Build(east, north, world.SeedBits, out var west, out var far, out var chamber, passage);
             Passage = passage;

@@ -1,6 +1,6 @@
 using UnityEngine;
 
-#if DEVELOPMENT_BUILD
+#if DEVELOPMENT_BUILD || REOL_TEST_BUILD
 using System;
 using System.Collections;
 using System.Diagnostics;
@@ -13,7 +13,7 @@ namespace Reol2.Demo
     [RequireComponent(typeof(VoxelDemoTerrain))]
     public sealed class VoxelDemoBenchmark : MonoBehaviour
     {
-#if DEVELOPMENT_BUILD
+#if DEVELOPMENT_BUILD || REOL_TEST_BUILD
         private const int WarmupFrames = 120;
         private const int SampleCount = 100;
 

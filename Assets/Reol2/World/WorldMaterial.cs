@@ -45,6 +45,25 @@ namespace Reol2.World
             return Color.Lerp(land, bedrock, rock);
         }
 
+        internal static Color32 TintForClimate(Color32 color, RegionalClimate climate, float height, Vector3 normal)
+        {
+            Color land = color;
+            float cover = WorldNoise.Ramp((normal.y - 0.36f) / 0.52f) * WorldNoise.Ramp((height - 2f) / 18f);
+            float dry = 1f - WorldNoise.Ramp((climate.Aridity - 0.15f) / 0.61f);
+            float wet = WorldNoise.Ramp((climate.Aridity - 0.84f) / 0.9f);
+            land = Color.Lerp(land, new Color(0.66f, 0.53f, 0.34f), dry * cover * 0.78f);
+            land = Color.Lerp(land, new Color(0.18f, 0.37f, 0.27f), wet * cover * 0.49f);
+            float frost = WorldNoise.Ramp((0.5f - climate.Temperature) / 8f) * cover;
+            return Color.Lerp(land, new Color(0.83f, 0.87f, 0.91f), frost * 0.92f);
+        }
+
+        internal static Color32 TintRiverSediment(Color32 land, WorldPosition point, float heightAboveWater, float detail, ulong seed)
+        {
+            float variation = WorldNoise.Value((int)Math.Floor(point.X), (int)Math.Floor(point.Z), 5, seed + 467);
+            float coverage = 1f - WorldNoise.Ramp(heightAboveWater / (2.6f + 0.8f * variation));
+            return Color32.Lerp(land, new Color32(146, 128, 97, 255), detail * coverage * (0.72f + 0.2f * variation));
+        }
+
         private static float Band(int x, int z, float spacing, int shift, ulong seed)
         {
             float weight = BandWeight(spacing, shift);

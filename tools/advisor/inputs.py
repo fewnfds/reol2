@@ -8,7 +8,7 @@ import mimetypes
 from pathlib import Path
 import urllib.parse
 
-from transport import PROVIDER, ROOT, STUDIO_PROVIDER, PROVIDER_CONFIGS
+from transport import LEGACY_CONFIG, ROOT, WEB_CONFIG
 
 MIME_OVERRIDES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
                   ".ogg": "audio/ogg", ".opus": "audio/opus", ".webm": "video/webm"}
@@ -16,7 +16,7 @@ MIME_OVERRIDES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"
 
 def input_path(path: Path, config_path: Path) -> Path:
     path = path.resolve()
-    config_paths = (config_path, *PROVIDER_CONFIGS.values())
+    config_paths = (config_path, WEB_CONFIG, LEGACY_CONFIG)
     if any(path == config.resolve() for config in config_paths) or path.name.startswith(".env"):
         raise ValueError("Credential/config files cannot be sent as input.")
     return path
@@ -74,10 +74,10 @@ def prepare_inputs(args) -> dict:
     attachments.extend({"file_id": file_id} for file_id in file_ids)
     prepared = {"prompt": prompt, "native_parts": native, "media_inputs": media, "attachments": attachments,
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "file_ids": file_ids}
-    return consultation_input(prepared, getattr(args, "provider", PROVIDER))
+    return consultation_input(prepared)
 
 
-def consultation_input(prepared: dict, provider: str) -> dict:
+def consultation_input(prepared: dict) -> dict:
     prompt = prepared["prompt"]
     media = prepared["media_inputs"]
     file_ids = prepared["file_ids"]
@@ -87,8 +87,6 @@ def consultation_input(prepared: dict, provider: str) -> dict:
         mime = item["mime"]
         if mime.startswith("image/"):
             chat.append({"type": "image_url", "image_url": {"url": item["url"]}})
-        elif provider == STUDIO_PROVIDER and mime.startswith("video/"):
-            chat.append({"type": "video_url", "video_url": {"url": item["url"]}})
         elif mime.startswith("audio/"):
             fmt = {".mp3": "mp3", ".m4a": "m4a"}.get(item["suffix"], item["suffix"].lstrip("."))
             chat.append({"type": "input_audio", "input_audio": {"data": item["data"], "format": fmt}})

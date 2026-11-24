@@ -147,27 +147,38 @@ namespace Reol2.Editor
         public static void BuildLargeWorld()
         {
             CreateLargeWorld();
-            BuildScene(LargeWorldPath, "Builds/LargeWorld/Reol2World.exe");
+            string executable = BuildScene(LargeWorldPath, "Builds/LargeWorld/Reol2World.exe");
+            string play = Path.Combine(Path.GetDirectoryName(executable), "Play-River-Demo.cmd");
+            File.WriteAllLines(play, new[]
+            {
+                "@echo off",
+                "pushd \"%~dp0\"",
+                "setlocal",
+                $"set \"player=%~dp0{Path.GetFileName(executable)}\"",
+                "set \"world=-landforms 64 -world-seed 20261121 -river-demo\"",
+                "if \"%~1\"==\"\" (",
+                "    start \"\" \"%player%\" %world% -screen-fullscreen 1 -window-mode borderless -reol-native-resolution",
+                ") else (",
+                "    start \"\" \"%player%\" %world% %*",
+                ")",
+                "popd"
+            });
         }
 
-        private static void BuildScene(string scene, string defaultOutput)
+        private static string BuildScene(string scene, string defaultOutput)
         {
             string[] arguments = Environment.GetCommandLineArgs();
             int outputArgument = Array.IndexOf(arguments, "-buildOutput");
             string executable = outputArgument >= 0 && outputArgument + 1 < arguments.Length
                 ? arguments[outputArgument + 1] : defaultOutput;
-            string directory = Path.GetDirectoryName(Path.GetFullPath(executable));
+            executable = Path.GetFullPath(executable);
+            string directory = Path.GetDirectoryName(executable);
             Directory.CreateDirectory(directory);
-            BuildReport report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
-            {
-                scenes = new[] { scene },
-                locationPathName = executable,
-                target = BuildTarget.StandaloneWindows64,
-                options = BuildOptions.Development
-            });
+            BuildReport report = BuildPipeline.BuildPlayer(WindowsTestBuild.Options(scene, executable));
             if (report.summary.result != BuildResult.Succeeded)
                 throw new InvalidOperationException($"Continent build {report.summary.result}.");
             File.Copy("THIRD_PARTY_NOTICES.md", Path.Combine(directory, "THIRD_PARTY_NOTICES.md"), overwrite: true);
+            return executable;
         }
 
         private static Material GetOcean()

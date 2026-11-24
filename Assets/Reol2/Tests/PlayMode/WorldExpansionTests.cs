@@ -85,9 +85,11 @@ namespace Reol2.Tests
             yield return new WaitForSeconds(0.3f);
             Assert.That(player.Environment.ActivePrecipitation, Is.GreaterThan(0));
             Assert.That(player.Environment.ActivePrecipitation, Is.LessThanOrEqualTo(1070));
-            Assert.That(player.EnterAt(terrain.OceanEntry), Is.True);
+            WorldPosition sea = terrain.OceanEntry;
+            Assert.That(player.EnterAt(new WorldPosition(sea.X, -6f, sea.Z)), Is.True);
             player.Look(0f, -24f);
-            Assert.That(Camera.main.clearFlags, Is.EqualTo(CameraClearFlags.SolidColor));
+            Assert.That(player.Environment.UnderwaterEffectsActive, Is.True);
+            Assert.That(Camera.main.clearFlags, Is.EqualTo(CameraClearFlags.Skybox));
             Assert.That(player.Environment.ActivePrecipitation, Is.Zero);
         }
 
@@ -111,7 +113,9 @@ namespace Reol2.Tests
             var environment = player.gameObject.AddComponent<WorldEnvironment>();
             environment.Clock.Advance(15 * WorldClock.Hour);
             environment.Apply(view, terrain, player.WorldFeet, underwater: true, underground: false);
-            Assert.That(RenderSettings.fogEndDistance, Is.EqualTo(210f));
+            Assert.That(environment.UnderwaterEffectsActive, Is.True);
+            Assert.That(view.GetComponent<AudioLowPassFilter>().enabled, Is.True);
+            Assert.That(view.farClipPlane, Is.GreaterThan(10000f));
             Assert.That(sun.intensity, Is.LessThan(intensity));
 
             Object.Destroy(environment);
@@ -120,6 +124,7 @@ namespace Reol2.Tests
             Assert.That(RenderSettings.fogEndDistance, Is.EqualTo(fogEnd));
             Assert.That(sun.intensity, Is.EqualTo(intensity));
             Assert.That(view.farClipPlane, Is.EqualTo(farClip));
+            Assert.That(view.GetComponent<AudioLowPassFilter>(), Is.Null);
         }
 
         [UnityTest]
