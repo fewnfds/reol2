@@ -30,7 +30,7 @@ unity test . --mode PlayMode --output .local/playmode.xml --non-interactive
 
 ### Windows 本地试玩构建
 
-三个试玩共用 `WindowsTestBuild`。普通 Windows Player 以 `REOL_TEST_BUILD` 启用倍速 HUD 和基准命令。大世界和区域试玩共用 `Builds/LargeWorld`。构建同时生成 `Play-River-Demo.cmd`。两公里大陆和双块原型按需从各自入口构建。[大世界](large-world-demo.md#复现) · [两公里大陆](continent-demo.md#复现) · [双块原型](prototype.md#试玩) · [防火墙排查](pitfalls/windows-player-firewall.md)
+三个试玩共用 `WindowsTestBuild`。普通 Windows Player 以 `REOL_TEST_BUILD` 启用倍速 HUD 和基准命令。大世界和区域试玩共用 `Builds/LargeWorld`。构建同时生成地面启动脚本 `Play-Terrain-Demo.cmd` 与河流启动脚本 `Play-River-Demo.cmd`。两公里大陆和双块原型按需从各自入口构建。[大世界](large-world-demo.md#复现) · [两公里大陆](continent-demo.md#复现) · [双块原型](prototype.md#试玩) · [防火墙排查](pitfalls/windows-player-firewall.md)
 
 ### 渲染复现包
 

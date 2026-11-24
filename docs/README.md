@@ -4,7 +4,7 @@ Reol 2 是 Windows 单机第三人称 3D 修仙沙盒。当前原型验证连续
 
 ## 试玩
 
-本机运行 `Builds/LargeWorld/Play-River-Demo.cmd` 进入区域地貌试玩，使用默认种子 `20261121`、64 公里区域和原生分辨率无边框窗口。直接运行同目录的 `Reol2World.exe` 进入默认大世界。[操作与构建](large-world-demo.md#试玩)
+本机运行 `Builds/LargeWorld/Play-Terrain-Demo.cmd`，从 64 公里地貌的地面开始试玩逐格挖填与两点整形。河流试玩从同目录的 `Play-River-Demo.cmd` 进入。两者使用种子 `20261121` 和原生分辨率无边框窗口。直接运行 `Reol2World.exe` 进入默认大世界。[操作与构建](large-world-demo.md#试玩)
 
 ## 当前技术文档
 

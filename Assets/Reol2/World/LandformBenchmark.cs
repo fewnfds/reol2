@@ -79,14 +79,13 @@ namespace Reol2.World
 
             if (region != null)
             {
-                var center = new WorldPosition(landing.X - region.Landing.X, 0d, landing.Z - region.Landing.Y);
                 foreach (RiverReach reach in region.Rivers.Reaches)
                 {
                     var position = (reach.Upstream.Center + reach.Downstream.Center) * 0.5f;
                     float level = region.WaterAt(position);
                     if (level < 12f || reach.Downstream.HalfWidth < 14f)
                         continue;
-                    var river = new WorldPosition(center.X + position.X, level - 1.15f, center.Z + position.Y);
+                    WorldPosition river = terrain.PlaceInRegion(position, level - 1.15f);
                     if (!terrain.TrySampleWaterColumn(river, out float surface, out float bottom) || surface - bottom < 1.5f)
                         continue;
                     if (!Check(player.EnterAt(river) && player.MoveMode == ExplorerMoveMode.Swim, "landform river swimming"))
@@ -104,7 +103,7 @@ namespace Reol2.World
 
                 if (region.HasLake)
                 {
-                    var lake = new WorldPosition(center.X + region.Basin.X, region.LakeLevel - 1.15f, center.Z + region.Basin.Y);
+                    WorldPosition lake = terrain.PlaceInRegion(region.Basin, region.LakeLevel - 1.15f);
                     if (!Check(player.EnterAt(lake) && player.MoveMode == ExplorerMoveMode.Swim, "landform basin lake swimming"))
                         yield break;
                     Debug.Log(FormattableString.Invariant($"Landform check | lake depth {region.LakeLevel - terrain.SurfaceHeight(lake):F2} m | swim"));

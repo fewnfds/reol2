@@ -20,7 +20,6 @@ namespace Reol2.World
         private const float SwimRadius = 0.73f;
         private const float SwimHalfSegment = 0.36f;
         internal const float SurfaceSwimDepth = 0.92f;
-        private const float BrushOffset = 0.20f;
         private static readonly Vector2Int[] HomeProbes = { Vector2Int.zero, Vector2Int.right, Vector2Int.left,
             Vector2Int.up, Vector2Int.down, new(1, 1), new(-1, 1), new(1, -1), new(-1, -1) };
 
@@ -50,8 +49,6 @@ namespace Reol2.World
         private bool choosingDestination;
         private bool suppressInputFrame;
         private bool centerAim;
-        private bool gridBrush;
-        private Vector3[] cellOutline, brushOutline;
         private WorldPosition? gradeStart;
         private string destinationX, destinationY, destinationZ;
         private string arrivalMessage;
@@ -85,24 +82,14 @@ namespace Reol2.World
 
         private void Start()
         {
-            if (terrain.IsLargeWorld)
-            {
-                cellOutline = new Vector3[selection.positionCount];
-                selection.GetPositions(cellOutline);
-                brushOutline = new Vector3[40];
-                float footprint = Mathf.Sqrt(ContinentField.BrushRadius * ContinentField.BrushRadius - BrushOffset * BrushOffset);
-                for (int i = 0; i < brushOutline.Length; i++)
-                {
-                    float angle = i * (2f * Mathf.PI / brushOutline.Length);
-                    brushOutline[i] = new Vector3(Mathf.Cos(angle), Mathf.Sin(angle), 0f) * footprint;
-                }
-                SetBrushOutline();
-            }
             EnterAt(terrain.WorldLanding);
-            if (terrain.Landforms is RegionalLandforms region)
+            if (terrain.IsTerrainDemo)
+                Look(186f, 29f);
+            else if (terrain.Landforms is RegionalLandforms region)
                 Look(Mathf.Atan2(region.LandingView.X, region.LandingView.Y) * Mathf.Rad2Deg, 3f);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
-            if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-river-demo") >= 0)
+            string[] arguments = System.Environment.GetCommandLineArgs();
+            if (System.Array.IndexOf(arguments, "-river-demo") >= 0)
                 EnterRiverDemo();
 #endif
             Cursor.lockState = CursorLockMode.None;
@@ -176,12 +163,6 @@ namespace Reol2.World
             movementSpeed.ApplyStep(input.SpeedStep);
             if (HandleDestination(input.Destination))
                 return;
-            if (input.ToggleGrid && terrain.IsLargeWorld)
-            {
-                gradeStart = null;
-                gridBrush = !gridBrush;
-                SetBrushOutline();
-            }
             if (input.ToggleFlight)
                 flying = !flying;
             if (input.AdvanceTime)
@@ -402,8 +383,6 @@ namespace Reol2.World
             if (terrain.Landforms is not RegionalLandforms region)
                 return false;
 
-            WorldPosition landing = terrain.WorldLanding;
-            double originX = landing.X - region.Landing.X, originZ = landing.Z - region.Landing.Y;
             float bestWidth = 8f;
             WorldPosition feet = default;
             float heading = 0f, tilt = 0f;
@@ -414,10 +393,11 @@ namespace Reol2.World
                     continue;
 
                 var middle = (reach.Upstream.Center + reach.Downstream.Center) * 0.5f;
-                double x = originX + middle.X, z = originZ + middle.Y;
                 float level = (reach.Upstream.Level + reach.Downstream.Level) * 0.5f;
-                if (!terrain.TrySampleWaterColumn(new WorldPosition(x, level - 0.8f, z), out float water, out _))
+                WorldPosition channel = terrain.PlaceInRegion(middle, level - 0.8f);
+                if (!terrain.TrySampleWaterColumn(channel, out float water, out _))
                     continue;
+                double x = channel.X, z = channel.Z;
 
                 var along = System.Numerics.Vector2.Normalize(reach.Downstream.Center - reach.Upstream.Center);
                 var across = new System.Numerics.Vector2(-along.Y, along.X);
@@ -676,15 +656,6 @@ namespace Reol2.World
             environment.Apply(view, terrain, WorldFeet, underwater, underground);
         }
 
-        private void SetBrushOutline()
-        {
-            Vector3[] outline = gridBrush ? cellOutline : brushOutline;
-            selection.loop = !gridBrush;
-            selection.positionCount = outline.Length;
-            selection.SetPositions(outline);
-            selection.transform.rotation = Quaternion.identity;
-        }
-
         private void UpdateSelection(Ray sight, ExplorerInput input)
         {
             Vector3 eye = transform.position + Vector3.up * CurrentEyeHeight;
@@ -695,25 +666,11 @@ namespace Reol2.World
                     ShowToolMessage("Aim at reachable terrain to prospect");
                 return;
             }
-            bool useCells = !terrain.IsLargeWorld || gridBrush;
-            if (useCells || input.Prospect)
-            {
-                terrain.GetEditCells(sight, hit, out Vector3Int dig, out Vector3Int fill, out WorldPosition sample, out bool placed);
-                if (terrain.IsLargeWorld && input.Prospect)
-                    ShowToolMessage(terrain.Prospect(sample, placed));
-                if (useCells)
-                {
-                    selection.transform.position = terrain.ToLocal(new WorldPosition(dig.x + 0.5, dig.y + 0.5, dig.z + 0.5));
-                    if (input.Dig)
-                        terrain.TryEdit(dig, fill: false, motor);
-                    else if (input.Fill)
-                        terrain.TryEdit(fill, fill: true, motor);
-                    return;
-                }
-            }
-            selection.transform.SetPositionAndRotation(hit.point + hit.normal * 0.035f,
-                Quaternion.FromToRotation(Vector3.forward, hit.normal));
-            if (input.Grade)
+            terrain.GetEditCells(sight, hit, out Vector3Int dig, out Vector3Int fill, out WorldPosition sample, out bool placed);
+            selection.transform.position = terrain.ToLocal(new WorldPosition(dig.x + 0.5, dig.y + 0.5, dig.z + 0.5));
+            if (terrain.IsLargeWorld && input.Prospect)
+                ShowToolMessage(terrain.Prospect(sample, placed));
+            if (terrain.IsLargeWorld && input.Grade)
             {
                 if (hit.normal.y < 0.5f)
                 {
@@ -735,12 +692,10 @@ namespace Reol2.World
                     gradeStart = point;
                 return;
             }
-            if (input.Dig || input.Fill)
-            {
-                bool fill = !input.Dig;
-                var center = terrain.ToWorld(hit.point + hit.normal * (fill ? BrushOffset : -BrushOffset));
-                terrain.TryEditSphere(center, fill, motor);
-            }
+            if (input.Dig)
+                terrain.TryEdit(dig, fill: false, motor);
+            else if (input.Fill)
+                terrain.TryEdit(fill, fill: true, motor);
         }
 
         private void ShowToolMessage(string message)
@@ -760,7 +715,7 @@ namespace Reol2.World
             GUI.Label(new Rect(23, 41, 785, 23),
                 "W/S move   A/D turn   Q/E strafe   Shift sprint   Alt walk   C crouch   Space/X rise/dive   F fly");
             GUI.Label(new Rect(23, 64, 785, 23),
-                "Drag L orbit / R steer   Both move   Wheel zoom   1 Dig / 2 Place   G Prospect   ] time");
+                "Drag L orbit / R steer   Both move   Wheel zoom   1 Dig cell / 2 Fill cell   G Prospect   ] time");
             if (terrain.IsLargeWorld)
             {
                 const string travelKeys = "F1 sea   F2/F3 caves   F4 deep cavern   F5 lake   F6 trench   F7 peaks   T travel";
@@ -769,8 +724,8 @@ namespace Reol2.World
 #else
                 GUI.Label(new Rect(23, 87, 785, 23), travelKeys);
 #endif
-                GUI.Label(new Rect(23, 110, 785, 23), gridBrush ? "Grid brush   B for free brush" :
-                    gradeStart.HasValue ? "Grade: aim at the end and press 3   Esc cancel" : "Free brush   3 mark grade endpoints   B for grid brush");
+                GUI.Label(new Rect(23, 110, 785, 23), gradeStart.HasValue
+                    ? "Grade: aim at the end and press 3   Esc cancel" : "3 mark two points to grade a slope");
             }
             if (Time.unscaledTime < prospectUntil)
                 GUI.Box(new Rect(12, terrain.IsLargeWorld ? 150 : 128, 650, 28), prospectMessage);

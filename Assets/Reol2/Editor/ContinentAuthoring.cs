@@ -148,14 +148,21 @@ namespace Reol2.Editor
         {
             CreateLargeWorld();
             string executable = BuildScene(LargeWorldPath, "Builds/LargeWorld/Reol2World.exe");
-            string play = Path.Combine(Path.GetDirectoryName(executable), "Play-River-Demo.cmd");
+            const string region = "-landforms 64 -world-seed 20261121";
+            WriteLauncher(executable, "Play-Terrain-Demo.cmd", region + " -terrain-demo");
+            WriteLauncher(executable, "Play-River-Demo.cmd", region + " -river-demo");
+        }
+
+        private static void WriteLauncher(string executable, string name, string arguments)
+        {
+            string play = Path.Combine(Path.GetDirectoryName(executable), name);
             File.WriteAllLines(play, new[]
             {
                 "@echo off",
                 "pushd \"%~dp0\"",
                 "setlocal",
                 $"set \"player=%~dp0{Path.GetFileName(executable)}\"",
-                "set \"world=-landforms 64 -world-seed 20261121 -river-demo\"",
+                $"set \"world={arguments}\"",
                 "if \"%~1\"==\"\" (",
                 "    start \"\" \"%player%\" %world% -screen-fullscreen 1 -window-mode borderless -reol-native-resolution",
                 ") else (",

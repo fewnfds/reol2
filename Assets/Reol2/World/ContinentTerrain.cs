@@ -56,11 +56,13 @@ namespace Reol2.World
         private bool scheduled;
         private ContinentStreamProbe probe;
         private WorldPosition? deepSea;
+        private WorldPosition? terrainDemoLanding;
 
         public bool IsLargeWorld => largeWorld;
         public long Seed => worldSeed;
-        public Vector3 Landing => frame.ToLocal(field.Landing);
-        public WorldPosition WorldLanding => field.Landing;
+        public Vector3 Landing => frame.ToLocal(WorldLanding);
+        public WorldPosition WorldLanding => terrainDemoLanding ?? field.Landing;
+        internal bool IsTerrainDemo => terrainDemoLanding.HasValue;
         public WorldPosition OceanEntry => field.SeaEntry;
         public WorldPosition WestCaveEntrance => field.Caves.WestEntrance;
         public WorldPosition EastCaveEntrance => field.Caves.EastEntrance;
@@ -160,12 +162,20 @@ namespace Reol2.World
                 }
 #endif
                 field = new ContinentField(world, landforms, surfaceData);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
+                if (surfaceData == null && worldSeed == 20261121 && landforms?.Size == 64000
+                    && Array.IndexOf(arguments, "-terrain-demo") >= 0)
+                {
+                    const double x = 8778.5, z = 6108.5;
+                    terrainDemoLanding = new WorldPosition(x, field.HeightAt(x, z) + 0.18, z);
+                }
+#endif
                 worldHorizon = new WorldHorizon(transform, field, terrainMaterial, ocean, oceanMaterial);
                 caveHorizon = new WorldCaveHorizon(transform, field, worldHorizon);
                 if (!field.Surface.HasWaterTiles)
                     inlandWater = new WorldInlandWater(transform, field.Surface, oceanMaterial);
                 palette = GlobalColor;
-                frame.CenterOn(field.Landing);
+                frame.CenterOn(WorldLanding);
                 inlandWater?.Place(frame);
             }
             else
@@ -180,6 +190,7 @@ namespace Reol2.World
 
         public WorldPosition ToWorld(Vector3 local) => frame.ToWorld(local);
         public Vector3 ToLocal(WorldPosition point) => frame.ToLocal(point);
+        internal WorldPosition PlaceInRegion(System.Numerics.Vector2 point, double height) => field.Surface.Place(point, height);
         public float SurfaceHeight(WorldPosition point) => field.HeightAt(point.X, point.Z);
         internal RegionalClimate? GeneratedClimateAt(WorldPosition point) => field.Surface?.GeneratedClimateAt(point);
         public float SurfaceHeight(float x, float z) => largeWorld
@@ -417,7 +428,8 @@ namespace Reol2.World
         internal void GetEditCells(Ray aim, RaycastHit hit, out Vector3Int dig, out Vector3Int fill,
             out WorldPosition sample, out bool placed)
         {
-            sample = frame.ToWorld(hit.point + aim.direction * 0.026f);
+            // Keep the ray on the material side without skipping a thin layer at a grid plane.
+            sample = frame.ToWorld(hit.point + aim.direction * 0.002f);
             dig = field.DigCellAt(sample, out placed);
             fill = frame.ToWorld(hit.point + hit.normal * 0.4f).Cell;
         }

@@ -136,17 +136,15 @@ namespace Reol2.World
         private WorldPosition EstuaryDive(WorldPosition reference)
         {
             RegionalLandforms region = terrain.Landforms;
-            WorldPosition home = terrain.WorldLanding;
-            double centerX = home.X - region.Landing.X, centerZ = home.Z - region.Landing.Y;
             double nearest = double.PositiveInfinity;
             WorldPosition destination = reference;
             foreach (RiverReach reach in region.Rivers.Reaches)
             {
                 if (reach.Downstream.Level != 0f || reach.Downstream.HalfWidth < 12f)
                     continue;
-                double x = centerX + reach.Downstream.Center.X, z = centerZ + reach.Downstream.Center.Y;
-                double distance = (x - reference.X) * (x - reference.X) + (z - reference.Z) * (z - reference.Z);
-                var point = new WorldPosition(x, -1.15f, z);
+                WorldPosition point = terrain.PlaceInRegion(reach.Downstream.Center, -1.15f);
+                double dx = point.X - reference.X, dz = point.Z - reference.Z;
+                double distance = dx * dx + dz * dz;
                 if (distance < nearest && terrain.TrySampleWaterColumn(point, out float water, out float ground)
                     && water - ground > 1.8f && MathF.Abs(water) < 0.06f)
                 {

@@ -506,22 +506,47 @@ namespace Reol2.World
             if (!Editable(cell))
                 return false;
 
-            Vector3Int start = cell * DensityVolume.SamplesPerMeter;
-            Vector3Int end = start + Vector3Int.one * DensityVolume.SamplesPerMeter;
-            Vector3Int low = end + Vector3Int.one;
-            Vector3Int high = start - Vector3Int.one;
-            for (int z = start.z; z <= end.z; z++)
-            for (int y = start.y; y <= end.y; y++)
-            for (int x = start.x; x <= end.x; x++)
+            const int core = DensityVolume.SamplesPerMeter / 2;
+            const int rim = core + 1;
+            Vector3Int center = cell * DensityVolume.SamplesPerMeter + Vector3Int.one * core;
+            Vector3Int low = center + Vector3Int.one * (rim + 1);
+            Vector3Int high = center - Vector3Int.one * (rim + 1);
+            // Derive the same shape on every edit and after an origin shift.
+            ulong shape = WorldNoise.Hash(cell.x, cell.z, materialSeed ^ unchecked((uint)cell.y));
+            float shiftX = (WorldNoise.Unit(shape) - 0.5f) * 0.04f;
+            float shiftZ = (WorldNoise.Unit(shape << 32) - 0.5f) * 0.04f;
+            float radius = Mathf.Lerp(0.16f, 0.22f, (shape & 255) / 255f);
+            for (int z = -rim; z <= rim; z++)
+            for (int y = -rim; y <= rim; y++)
+            for (int x = -rim; x <= rim; x++)
             {
-                var sample = new Vector3Int(x, y, z);
+                // The outer endpoint of a crossing edge is one lattice step outside the cell.
+                int exteriorAxes = (Math.Abs(x) > core ? 1 : 0) + (Math.Abs(y) > core ? 1 : 0)
+                    + (Math.Abs(z) > core ? 1 : 0);
+                if (exteriorAxes > 1)
+                    continue;
+                Vector3Int sample = center + new Vector3Int(x, y, z);
+                if (exteriorAxes != 0 && !SculptRangeAllowed(sample, sample))
+                    continue;
+
+                float stamp = GridCellDensity(x * Spacing - shiftX, y * Spacing, z * Spacing - shiftZ, radius);
                 SampleEdit current = Read(sample);
-                Vector3 offset = (Vector3)(sample - start) * Spacing - Vector3.one * 0.5f;
-                float stamp = DensityVolume.RoundedBox(offset, Vector3.one * 0.55f, 0.08f);
                 float next = fill ? Mathf.Min(current.Density, stamp) : Mathf.Max(current.Density, -stamp);
                 StoreChange(sample, current, next, cell, ref low, ref high);
             }
             return CompleteBrush(low, high, out changed);
+        }
+
+        private static float GridCellDensity(float x, float y, float z, float radius)
+        {
+            const float halfWidth = 0.625f;
+            const float halfHeight = 0.555f;
+            var corner = new Vector2(Mathf.Abs(x), Mathf.Abs(z)) - Vector2.one * (halfWidth - radius);
+            float side = Mathf.Max(corner.x, corner.y);
+            float rounded = side <= 0f ? side : Vector2.Max(corner, Vector2.zero).magnitude;
+            // At a top or bottom sample within the cell the cap dominates even at a rounded
+            // corner. Neighbouring cuts at the same elevation then share a plane across the join.
+            return Mathf.Max(rounded - radius, Mathf.Abs(y) - halfHeight);
         }
 
         internal bool EditSphere(WorldPosition center, bool fill, out BoundsInt changed)
@@ -795,11 +820,14 @@ namespace Reol2.World
         {
             var samplePoint = new WorldPosition(point.X * 2, point.Y * 2, point.Z * 2);
             Vector3Int corner = samplePoint.Cell;
+            placed = false;
+            // This page's edit invalidation includes the halo where the eight pick corners lie.
+            if (!HasEdits(FloorChunk(corner)))
+                return point.Cell;
             var fraction = new Vector3((float)(samplePoint.X - corner.x), (float)(samplePoint.Y - corner.y),
                 (float)(samplePoint.Z - corner.z));
             float closest = float.PositiveInfinity;
             Vector3Int? source = null;
-            placed = false;
             for (int z = 0; z <= 1; z++)
             for (int y = 0; y <= 1; y++)
             for (int x = 0; x <= 1; x++)

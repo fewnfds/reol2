@@ -2,7 +2,9 @@
 
 ## 试玩
 
-在本机双击 `Builds/LargeWorld/Play-River-Demo.cmd`。默认以种子 `20261121` 打开自研 64 公里区域，从河段上空开始，使用所在屏幕的原生分辨率和无边框全屏。直接运行同目录的 `Reol2World.exe` 可进入默认大世界。Unity 编辑器菜单为 `Reol 2 → Open Large World`，场景为 `Assets/Scenes/LargeWorld.unity`。[本机河流试玩](../Builds/LargeWorld/Play-River-Demo.cmd) · [坐标、流送与水位](roadmap/world-engine.md)
+双击 `Builds/LargeWorld/Play-Terrain-Demo.cmd`，从地面开始测试逐格挖填。将鼠标指向角色前方的地面，按 `1` 挖一格，再挖同一标高的相邻格。朝坑底或侧壁按 `2` 填土。用 `3` 分别标定一段缓坡的两个端点，再沿新坡面走一趟。
+
+同目录的 `Play-River-Demo.cmd` 从河段上空开始。两种入口采用种子 `20261121`、64 公里区域、原生分辨率无边框窗口。直接运行 `Reol2World.exe` 进入默认大世界。Unity 编辑器菜单为 `Reol 2 → Open Large World`，场景为 `Assets/Scenes/LargeWorld.unity`。[地面试玩](../Builds/LargeWorld/Play-Terrain-Demo.cmd) · [河流试玩](../Builds/LargeWorld/Play-River-Demo.cmd) · [坐标、流送与水位](roadmap/world-engine.md)
 
 | 按键 | 行为 |
 | --- | --- |
@@ -12,8 +14,8 @@
 | `=`、`-` 或右下角 `+`、`−` | 移动倍率翻倍或减半，适用于地面、飞行和游泳。初始为 1×。 |
 | `F`、`Space`、`X/C` | 切换飞行。地面按 `Space` 跳跃。空中按 `Space` 上升、`X/C` 下降。水中按 `Space` 上浮、`X/C` 下潜。 |
 | 水面右键掌舵前进 | 默认沿水面游，俯角达到 25° 时下潜。 |
-| `1`、`2`、`G` | 在指针或准星命中处挖、填、勘探。 |
-| `3`、`Esc`、`B` | 以两个地面位置确定整形坡面，`Esc` 取消起点。`B` 切换连续笔刷和一米盒刷。 |
+| `1`、`2`、`G` | 沿指针或准星挖一格、填一格、勘探。线框显示当前挖掘目标。 |
+| `3`、`Esc` | 以两个地面位置确定整形坡面，`Esc` 取消起点。 |
 | `]` | 推进三个游戏小时。 |
 | `F1` 至 `F7` | 去近海、巨洞西口、巨洞东口、深洞、湖盆、海沟、高空。 |
 | `T`、`Home`、`Esc` | 输入世界坐标远传、回出生点、取消面板或释放拖动。 |
@@ -21,7 +23,7 @@
 
 ## 地形精度
 
-连续球刷半径 0.65 米，球心沿命中表面法线偏移 0.20 米。两点整形要求水平距离 2–32 米，核心宽 2 米，两侧各有 0.75 米过渡。工具检查选中的地表层与角色占用。近场渲染与碰撞共用 0.5 米密度采样的曲面。可在同一进程离开后回访改动。[地形编辑](../Assets/Reol2/World/ContinentField.cs) · [基础玩法验证](roadmap/world-engine.md#编辑碰撞与通行)
+手工挖填以一米格为操作单位。样本跨格边界插值，形成圆钝的边角和随世界种子确定的轻微变化。同一标高的相邻挖格共享平底。两点整形要求水平距离 2–32 米，核心宽 2 米，两侧各有 0.75 米过渡。工具检查选中的地表层与角色占用。近场渲染与碰撞共用 0.5 米密度采样的曲面。可在同一进程离开后回访改动。[地形编辑](../Assets/Reol2/World/ContinentField.cs) · [基础玩法验证](roadmap/world-engine.md#编辑碰撞与通行)
 
 ## 区域地貌与水岸
 
@@ -29,7 +31,7 @@
 
 ## 本机验证
 
-2026 年 11 月 24 日最近一轮验证通过 83 项 Play Mode。Windows 复跑了 16、64、256 公里的步行、挖掘回访、飞行和游泳，以及固定河口和沿海路线。区域生成性能取决于尺寸、种子和本机条件。[区域测试报告与性能](H:/reol2-workbench/goals/landform-generation/river-centerline-implementation.md)
+Play Mode 覆盖指针挖填、跨四个地形页的坑底、填土来源、行走碰撞和区块卸载回访。Windows 以相同种子复跑巨洞接缝挖填、20 米坡面与区域步行、飞行和游泳。[挖填实测](H:/reol2-workbench/goals/grid-excavation/results.md) · [河道旧基线](H:/reol2-workbench/goals/landform-generation/river-centerline-implementation.md)
 
 ## 复现
 
@@ -44,6 +46,7 @@ unity build . --target StandaloneWindows64 --execute-method Reol2.Editor.Contine
 | --- | --- |
 | `-landforms 16/64/256` | 选择其一进入相应尺寸的区域，附加 `-world-seed <整数>` 可切换种子。 |
 | `-continent-benchmark -landforms 64 -landform-check` | 区域步行、飞行、挖掘回访和游泳。 |
+| `-continent-benchmark -world-sculpt-check` | 巨洞编辑、连续坡度、逐格挖开坡面和填回。附加 `-sculpt-grid` 执行旧版同路线的单格编辑性能对照。 |
 | `-continent-benchmark -world-controls-check` | 水面游泳、潜水、上浮和飞行控制。可附加 `-landforms 64` 复跑区域模式。 |
 | `-continent-benchmark -world-long-run` | 默认大世界千公里高空与 64 公里贴地路线。 |
 | `-continent-benchmark -world-seam-check` | 洞口和洞内的地表接缝。 |

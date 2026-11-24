@@ -27,29 +27,29 @@ namespace Reol2.Tests
         }
 
         [Test]
-        public void PointerBrushDeformsBothSidesOfAFarPageSeamAndSurvivesReturn()
+        public void PointerDigTargetsOneCellAtAFarPageSeamAndSurvivesReturn()
         {
             const double seam = -WorldDefinition.Extent + 128;
-            const double x = seam + 0.125, z = seam + 4.5;
+            const double x = seam + 0.5, z = seam + 4.5;
             double h = terrain.SurfaceHeight(new WorldPosition(x, 0, z));
             var observer = new WorldPosition(x, h + 1.75, z - 0.2);
             Assert.That(player.EnterAt(observer), Is.True);
             player.Look(0, 82);
             player.ProcessInput(default, 0f, focused: true);
-            double left = FloorAt(seam - 0.1, z, h + 3);
-            double right = FloorAt(seam + 0.1, z, h + 3);
-            AimAt(x, z, FloorAt(x, z, h + 3), new ExplorerInput { Dig = true });
-            double cutLeft = FloorAt(seam - 0.1, z, h + 3);
-            double cutRight = FloorAt(seam + 0.1, z, h + 3);
-            Assert.That(cutLeft, Is.LessThan(left - 0.10), "The stroke must cross into the neighbouring page.");
-            Assert.That(cutRight, Is.LessThan(right - 0.15));
+            double neighbourX = seam - 0.5;
+            double neighbour = FloorAt(neighbourX, z, h + 3);
+            double before = FloorAt(x, z, h + 3);
+            AimAt(x, z, before, new ExplorerInput { Dig = true });
+            double cut = FloorAt(x, z, h + 3);
+            Assert.That(cut, Is.LessThan(before - 0.15));
+            Assert.That(FloorAt(neighbourX, z, h + 3), Is.EqualTo(neighbour).Within(0.02),
+                "The adjacent cell must still have its floor.");
 
             Assert.That(player.EnterAt(terrain.WorldLanding), Is.True);
             Assert.That(player.EnterAt(observer), Is.True);
-            Assert.That(FloorAt(seam - 0.1, z, h + 3), Is.EqualTo(cutLeft).Within(0.004));
-            Assert.That(FloorAt(seam + 0.1, z, h + 3), Is.EqualTo(cutRight).Within(0.004));
+            Assert.That(FloorAt(x, z, h + 3), Is.EqualTo(cut).Within(0.004));
             player.Look(0, 82);
-            var fillPosition = new WorldPosition(x, FloorAt(x, z, h + 3), z);
+            var fillPosition = new WorldPosition(x, cut, z);
             Vector3 pointer = Camera.main.WorldToScreenPoint(terrain.ToLocal(fillPosition));
             Ray sight = Camera.main.ScreenPointToRay(pointer);
             Assert.That(terrain.PickSurface(sight, player.transform.position + Vector3.up * 1.38f, out RaycastHit hit),
@@ -60,6 +60,75 @@ namespace Reol2.Tests
             double afterFill = FloorAt(selected.X, selected.Z, h + 3);
             Debug.Log(FormattableString.Invariant($"Terrain precision | far seam fill | offset from aim ({selected.X - x:F4}, {selected.Y - fillPosition.Y:F4}, {selected.Z - z:F4}) m | height gain at hit {afterFill - beforeFill:F4} m"));
             Assert.That(afterFill, Is.GreaterThan(beforeFill + 0.15));
+        }
+
+        [Test]
+        public void GridCutsShareOneFloorAcrossFourPages()
+        {
+            const int x = 7536, z = -399848;
+            int y = Mathf.FloorToInt(terrain.SurfaceHeight(new WorldPosition(x, 0, z)));
+            double top = y + 0.70;
+            double rayHeight = top + 3;
+            Assert.That(player.EnterAt(new WorldPosition(x, top + 2, z - 3)), Is.True);
+            Assert.That(terrain.TryGrade(new WorldPosition(x - 3, top, z), new WorldPosition(x + 3, top, z)), Is.True);
+            double outside = FloorAt(x + 2.5, z, rayHeight);
+            for (int dz = -1; dz <= 0; dz++)
+            for (int dx = -1; dx <= 0; dx++)
+                Assert.That(terrain.TryEdit(new Vector3Int(x + dx, y, z + dz), fill: false), Is.True);
+
+            double minimum = double.PositiveInfinity, maximum = double.NegativeInfinity;
+            for (int dz = -5; dz <= 5; dz++)
+            for (int dx = -5; dx <= 5; dx++)
+            {
+                double floor = FloorAt(x + dx * 0.125, z + dz * 0.125, rayHeight);
+                minimum = Math.Min(minimum, floor);
+                maximum = Math.Max(maximum, floor);
+            }
+            Debug.Log(FormattableString.Invariant($"Grid cuts | floor relative to cell {minimum - y:F5}..{maximum - y:F5} m | spread {maximum - minimum:F5} m"));
+            Assert.That(minimum, Is.EqualTo(y - 0.055).Within(0.01));
+            Assert.That(maximum - minimum, Is.LessThan(0.004), "Crossings on the shared floor must align at the page corner.");
+            Assert.That(FloorAt(x + 2.5, z, rayHeight), Is.EqualTo(outside).Within(0.002));
+
+            player.Look(0, 38);
+            player.ProcessInput(default, 0f, focused: true);
+            AimAt(x - 2.5, z, FloorAt(x - 2.5, z, rayHeight), new ExplorerInput { Grade = true });
+            AimAt(x + 2.5, z, outside, new ExplorerInput { Grade = true });
+            Assert.That(FloorAt(x, z, rayHeight), Is.EqualTo(top).Within(0.025),
+                "Both construction endpoints must still work through the player input.");
+        }
+
+        [Test]
+        public void AFillThatCrossesAPageFaceCanBePickedOnTheNeighbouringSide()
+        {
+            var cell = new Vector3Int(-8, 12000, -8);
+            var center = new WorldPosition(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5);
+            Assert.That(terrain.TryEdit(cell, fill: true), Is.True);
+            Assert.That(player.EnterAt(new WorldPosition(center.X, center.Y, center.Z - 3)), Is.True);
+            terrain.PrepareEntry(terrain.ToLocal(center));
+
+            Vector3 eye = terrain.ToLocal(new WorldPosition(center.X - 2, center.Y, center.Z));
+            var ray = new Ray(eye, Vector3.right);
+            Assert.That(terrain.Pick(ray, eye, out Vector3Int dig, out _, out WorldPosition sample, out bool placed), Is.True);
+            Assert.That(sample.Cell, Is.EqualTo(cell + Vector3Int.left));
+            Assert.That(placed, Is.True);
+            Assert.That(dig, Is.EqualTo(cell), "The overhanging surface belongs to the cell that created it.");
+            Assert.That(terrain.TryEdit(dig, fill: false), Is.True);
+            Assert.That(Physics.Raycast(ray, 3f), Is.False);
+        }
+
+        [Test]
+        public void DigPicksTheThinSurfaceCellAboveAnIntegerHeight()
+        {
+            const int x = 7536, z = -399848;
+            int y = Mathf.FloorToInt(terrain.SurfaceHeight(new WorldPosition(x, 0, z)));
+            double height = y + 0.01;
+            Assert.That(player.EnterAt(new WorldPosition(x, height + 2, z - 3)), Is.True);
+            Assert.That(terrain.TryGrade(new WorldPosition(x - 3, height, z), new WorldPosition(x + 3, height, z)), Is.True);
+            Vector3 eye = terrain.ToLocal(new WorldPosition(x + 0.5, height + 2, z + 0.5));
+            Assert.That(terrain.Pick(new Ray(eye, Vector3.down), eye, out Vector3Int dig, out _), Is.True);
+            Assert.That(dig, Is.EqualTo(new Vector3Int(x, y, z)));
+            Assert.That(terrain.TryEdit(dig, fill: false), Is.True);
+            Assert.That(FloorAt(x + 0.5, z + 0.5, height + 2), Is.EqualTo(y - 0.055).Within(0.01));
         }
 
         [Test]

@@ -28,8 +28,8 @@ namespace Reol2.World
             foreach (Vector2 offset in new[] { Vector2.left, Vector2.right, Vector2.down, Vector2.up })
                 Require(terrain.TryEditSphere(new WorldPosition(x + 0.66 * offset.x, height - 0.20, z + 0.66 * offset.y), false), "crater stroke");
 
-            double center = ReadCraterHeight(terrain, x, z, height);
-            double side = ReadCraterHeight(terrain, x + 0.10, z, height);
+            double center = ReadGroundHeight(terrain, x, z, height);
+            double side = ReadGroundHeight(terrain, x + 0.10, z, height);
             Debug.Log(FormattableString.Invariant($"World sculpt | crater | center rise over 10 cm {center - side:F5} m | center {center:F5} m | side {side:F5} m"));
             Require(center - side < 0.13, "crater retains a collision spur");
             player.UpdateView();
@@ -68,11 +68,11 @@ namespace Reol2.World
             }
         }
 
-        private static double ReadCraterHeight(ContinentTerrain terrain, double x, double z, double height)
+        private static double ReadGroundHeight(ContinentTerrain terrain, double x, double z, double height)
         {
             Vector3 origin = terrain.ToLocal(new WorldPosition(x, height + 2, z));
             Require(Physics.Raycast(origin, Vector3.down, out RaycastHit hit, 5f) && hit.collider is MeshCollider,
-                    "missing crater collision");
+                    "missing ground collision");
             return terrain.ToWorld(hit.point).Y;
         }
 
@@ -117,6 +117,7 @@ namespace Reol2.World
             Require(!Physics.Raycast(ray, Vector3.down, 2.5f), "cave starts empty");
             const int count = 100;
             int initialSamples = terrain.EditedSamples;
+            int totalPages = 0, peakPages = 0, peakPending = terrain.PendingPages;
             double cold = 0;
             var hot = new double[count];
             var frames = new double[count];
@@ -131,6 +132,9 @@ namespace Reol2.World
                 else
                     hot[i - 1] = elapsed;
                 Require(changed, "stroke must change the field");
+                totalPages += terrain.LastEditPublishedPages;
+                peakPages = Math.Max(peakPages, terrain.LastEditPublishedPages);
+                peakPending = Math.Max(peakPending, terrain.PendingPages);
                 bool supported = Physics.Raycast(ray, Vector3.down, out RaycastHit hit, 2.5f);
                 Require(supported == fill, "collision must change in the same stroke");
                 if (supported)
@@ -144,7 +148,7 @@ namespace Reol2.World
             Array.Sort(hot);
             Array.Sort(frames);
             string mode = grid ? "grid" : "continuous";
-            Debug.Log(FormattableString.Invariant($"World sculpt | {mode} | cold edit {cold:F3} ms | cached 100 p50 {hot[49]:F3} p95 {hot[94]:F3} p99 {hot[98]:F3} max {hot[99]:F3} ms | cached rendered frame p99 {frames[98]:F3} max {frames[99]:F3} ms | unique samples {terrain.EditedSamples - initialSamples}"));
+            Debug.Log(FormattableString.Invariant($"World sculpt | {mode} | cold edit {cold:F3} ms | cached 100 p50 {hot[49]:F3} p95 {hot[94]:F3} p99 {hot[98]:F3} max {hot[99]:F3} ms | cached rendered frame p95 {frames[94]:F3} p99 {frames[98]:F3} max {frames[99]:F3} ms | unique samples {terrain.EditedSamples - initialSamples} | published {totalPages} pages, peak {peakPages} per edit | peak queue {peakPending}"));
 
             Vector3Int origin = FindCourse(terrain);
             var start = new WorldPosition(origin.x, origin.y, origin.z);
@@ -208,8 +212,49 @@ namespace Reol2.World
                 line.SetPositions(positions);
                 render();
                 capture("profile");
+                line.enabled = false;
                 UnityEngine.Object.Destroy(line.gameObject);
             }
+
+            if (!grid)
+                CheckGridCuts(terrain, view, render, capture, origin + Vector3Int.right * 8);
+        }
+
+        private static void CheckGridCuts(ContinentTerrain terrain, Camera view, Action render, Action<string> capture,
+                                          Vector3Int corner)
+        {
+            Vector3 aim = terrain.ToLocal(new WorldPosition(corner.x, corner.y + 0.20, corner.z));
+            Vector3 eye = aim + new Vector3(-2.8f, 4.3f, -4f);
+            view.transform.SetPositionAndRotation(eye, Quaternion.LookRotation(aim - eye));
+            render();
+            capture("cut-before");
+
+            Vector3Int first = corner - new Vector3Int(1, 0, 1);
+            Require(terrain.TryEdit(first, fill: false), "single grid cut through grade");
+            render();
+            capture("cut-single");
+
+            Require(terrain.TryEdit(first + Vector3Int.right, fill: false), "east grid cut");
+            Require(terrain.TryEdit(first + Vector3Int.forward, fill: false), "north grid cut");
+            Require(terrain.TryEdit(corner, fill: false), "northeast grid cut");
+            double low = double.PositiveInfinity, high = double.NegativeInfinity;
+            for (int z = -4; z <= 4; z++)
+            for (int x = -4; x <= 4; x++)
+            {
+                double floor = ReadGroundHeight(terrain, corner.x + x / 8d, corner.z + z / 8d, corner.y + 1);
+                low = Math.Min(low, floor);
+                high = Math.Max(high, floor);
+            }
+            Require(high - low < 0.005 && Math.Abs(low - (corner.y - 0.055)) < 0.01, "grid cuts share one floor");
+            render();
+            capture("cut-joined");
+
+            Require(terrain.TryEdit(first, fill: true), "refill first cell");
+            double raised = ReadGroundHeight(terrain, first.x + 0.5, first.z + 0.5, first.y + 1);
+            Require(raised > high + 0.8, "refill restores collision");
+            render();
+            capture("cut-refilled");
+            Debug.Log(FormattableString.Invariant($"World sculpt | 4 grid cuts | 81 floor rays {low:F5}..{high:F5} m | refilled {raised:F5} m"));
         }
 
         private static Vector3Int FindCourse(ContinentTerrain terrain)

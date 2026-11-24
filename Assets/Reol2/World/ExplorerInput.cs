@@ -10,7 +10,7 @@ namespace Reol2.World
         internal float Forward, Turn, Strafe, Zoom;
         internal bool HasPointer, PointerPressed, Orbit, Steer;
         internal bool Rise, Descend, Jump, Crouch, Run, Walk;
-        internal bool Dig, Fill, Grade, ToggleGrid, Prospect, Travel, Cancel, ToggleFlight, AdvanceTime;
+        internal bool Dig, Fill, Grade, Prospect, Travel, Cancel, ToggleFlight, AdvanceTime;
         internal Key Destination;
         internal int SpeedStep;
 
@@ -42,7 +42,6 @@ namespace Reol2.World
             input.Dig = Pressed(Key.Digit1);
             input.Fill = Pressed(Key.Digit2);
             input.Grade = Pressed(Key.Digit3);
-            input.ToggleGrid = Pressed(Key.B);
             input.Prospect = Pressed(Key.G);
             input.Travel = Pressed(Key.T);
             input.Cancel = Pressed(Key.Escape);
