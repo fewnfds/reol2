@@ -290,6 +290,20 @@ namespace Reol2.Tests
         }
 
         [Test]
+        public void TerrainLodUsesProjectedTriangleErrorAtTheRenderResolution()
+        {
+            float[] slope = { 0f, 1f, 2f, 2f, 3f, 4f, 4f, 5f, 6f };
+            Assert.That(WorldHorizon.MeasureCoarseningError(slope, 0, 3, 2), Is.Zero);
+            slope[4] += 2f;
+            float error = WorldHorizon.MeasureCoarseningError(slope, 0, 3, 2);
+            Assert.That(error, Is.EqualTo(2f));
+            float scale900 = WorldHorizon.PixelScale(900, 64f);
+            float scale1440 = WorldHorizon.PixelScale(1440, 64f);
+            Assert.That(WorldHorizon.ProjectError(error, 1200, scale900), Is.LessThan(1.5f));
+            Assert.That(WorldHorizon.ProjectError(error, 1200, scale1440), Is.GreaterThan(1.5f));
+        }
+
+        [Test]
         public void LakeAndMainRiverHaveSeededWaterAcrossTheGeographyGrid()
         {
             var surface = new WorldSurface(new WorldDefinition(20261121));

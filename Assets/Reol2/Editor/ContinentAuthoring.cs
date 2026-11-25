@@ -148,7 +148,8 @@ namespace Reol2.Editor
         {
             CreateLargeWorld();
             string executable = BuildScene(LargeWorldPath, "Builds/LargeWorld/Reol2World.exe");
-            const string region = "-landforms 64 -world-seed 20261121";
+            // Use the Windows backend that consistently exits the cave rendering checks.
+            const string region = "-landforms 64 -world-seed 20261121 -force-d3d11";
             WriteLauncher(executable, "Play-Terrain-Demo.cmd", region + " -terrain-demo");
             WriteLauncher(executable, "Play-River-Demo.cmd", region + " -river-demo");
         }

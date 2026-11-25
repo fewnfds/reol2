@@ -161,17 +161,20 @@ namespace Reol2.World
                     ? (1f - flashSecond / 11f) * weather.Storm : 0f;
                 sun.intensity = baseSunIntensity * mediumLight + flash * 1.8f;
             }
-            view.clearFlags = !underground && sky != null ? CameraClearFlags.Skybox : CameraClearFlags.SolidColor;
-            Color fog = underground ? CaveDark : horizon;
-            view.backgroundColor = fog;
+            // In a volumetric cave, rock occludes the outdoor view and the opening still shows it.
+            bool caveFog = underground && !terrain.IsLargeWorld;
+            bool caveLoading = underground && terrain.HasPendingCavePages;
+            view.clearFlags = !caveFog && !caveLoading && sky != null ? CameraClearFlags.Skybox : CameraClearFlags.SolidColor;
+            Color fog = caveFog ? CaveDark : horizon;
+            view.backgroundColor = caveLoading ? CaveDark : fog;
             float range = terrain.HorizonDistance(feet.Y);
             float visible = range * Mathf.Lerp(1f, 0.48f, weather.Haze);
             RenderSettings.fogColor = fog;
             if (terrain.IsLargeWorld)
             {
-                RenderSettings.fogStartDistance = underground ? 225f : visible * 0.14f;
-                RenderSettings.fogEndDistance = underground ? WorldCaveHorizon.VisibleDistance : visible;
-                view.farClipPlane = underground ? WorldCaveHorizon.VisibleDistance + 40f : range * 1.07f;
+                RenderSettings.fogStartDistance = visible * 0.14f;
+                RenderSettings.fogEndDistance = visible;
+                view.farClipPlane = range * 1.07f;
             }
             else
             {

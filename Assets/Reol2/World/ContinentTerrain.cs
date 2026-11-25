@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using Reol2.Voxels;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -48,6 +49,8 @@ namespace Reol2.World
         private WorldCaveHorizon caveHorizon;
         private WorldInlandWater inlandWater;
         private OceanSurface ocean;
+        private Camera horizonView;
+        private WorldTerrainSave terrainSave;
         private static readonly int GroundOrigin = Shader.PropertyToID("_ReolGroundOrigin");
         private bool coverageDirty;
         private Vector3Int center;
@@ -60,6 +63,7 @@ namespace Reol2.World
 
         public bool IsLargeWorld => largeWorld;
         public long Seed => worldSeed;
+        internal string TerrainSaveStatus => terrainSave?.Status;
         public Vector3 Landing => frame.ToLocal(WorldLanding);
         public WorldPosition WorldLanding => terrainDemoLanding ?? field.Landing;
         internal bool IsTerrainDemo => terrainDemoLanding.HasValue;
@@ -99,15 +103,23 @@ namespace Reol2.World
             : (worldHorizon.RegionalTilesBuilt, worldHorizon.RegionalCellVisits, worldHorizon.LongestRegionalTileBuild);
         public int HorizonTriangles => worldHorizon?.VisibleTriangles ?? 0;
         internal int CaveTiles => caveHorizon?.VisibleTiles ?? 0;
+        internal bool HasPendingCavePages => caveHorizon?.HasPendingPages == true;
         internal int HorizonLevelAt(WorldPosition point) => worldHorizon.VisibleLevelAt(point);
         internal long EvaluatedDensitySamples => field.EvaluatedDensitySamples;
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
         internal Vector3Int FrameOrigin => frame.Origin;
         internal WorldRenderReport.TileState[] RenderReportTiles() => worldHorizon.ReportVisibleTiles(frame);
+        internal (int Edges, float OriginalError, float Error) MeasureDryHorizonEdges() => worldHorizon.MeasureDryEdges();
+        internal (int Leaves, int WithError, int AboveThreshold, float MaximumPixels) ProjectedHorizonErrors() =>
+            worldHorizon.MeasureProjectedErrors();
+        internal int RegularHorizonBuilds => worldHorizon?.RegularTilesBuilt ?? 0;
+        internal (int Ready, int Pending) CaveEntranceProgress => caveHorizon.EntranceProgress;
         internal int RenderReportInlandWaterTriangles => worldHorizon?.SharedInlandWaterTriangles ?? 0;
         internal int RenderReportSeaTriangles => ocean.TriangleCount - RenderReportInlandWaterTriangles;
         internal int LastEditPublishedPages => changedChunks.Count;
+        internal bool TerrainSaveEnabled => terrainSave?.CanEdit == true;
+        internal bool TerrainEditsPending => terrainSave?.HasPendingEdits == true;
 #endif
 
         internal ContinentStreamProbe EnableStreamProbe() => probe ??= new ContinentStreamProbe();
@@ -151,7 +163,7 @@ namespace Reol2.World
                 int rangeFlag = Array.IndexOf(arguments, "-world-view-distance-km");
                 if (rangeFlag >= 0 && rangeFlag + 1 < arguments.Length
                     && float.TryParse(arguments[rangeFlag + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out float range)
-                    && range >= 10f && range <= 100f)
+                    && range >= 10f && range <= 160f)
                     ViewDistanceOverride = range * 1000f / 1.07f;
                 int surfaceFlag = Array.IndexOf(arguments, "-world-surface-bake");
                 if (surfaceFlag >= 0)
@@ -162,6 +174,10 @@ namespace Reol2.World
                 }
 #endif
                 field = new ContinentField(world, landforms, surfaceData);
+                if (surfaceData == null)
+                    OpenTerrainSave(arguments, landforms?.Size ?? 0);
+                if (terrainSave != null && !Application.isEditor)
+                    Application.wantsToQuit += terrainSave.TrySaveBeforeQuit;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
                 if (surfaceData == null && worldSeed == 20261121 && landforms?.Size == 64000
                     && Array.IndexOf(arguments, "-terrain-demo") >= 0)
@@ -188,7 +204,34 @@ namespace Reol2.World
             SetGroundOrigin();
         }
 
+        private void OpenTerrainSave(string[] arguments, int regionSize)
+        {
+            int rootFlag = Array.IndexOf(arguments, "-world-save-root");
+            if (rootFlag >= 0)
+            {
+                if (rootFlag + 1 < arguments.Length && !arguments[rootFlag + 1].StartsWith("-", StringComparison.Ordinal))
+                    terrainSave = new WorldTerrainSave(field, arguments[rootFlag + 1], worldSeed, regionSize);
+                else
+                    UnityEngine.Debug.LogWarning("-world-save-root requires a directory.");
+                return;
+            }
+            if (!Application.isEditor && Array.IndexOf(arguments, "-continent-benchmark") < 0)
+                terrainSave = new WorldTerrainSave(field, Path.Combine(Application.persistentDataPath, "WorldSaves"),
+                    worldSeed, regionSize);
+        }
+
+        private void Update() => terrainSave?.Tick(Time.unscaledTime);
+
+        internal bool TryQuitWithoutTerrainSave()
+        {
+            if (Application.isEditor || terrainSave?.ConfirmQuitWithoutSaving() != true)
+                return false;
+            Application.Quit();
+            return true;
+        }
+
         public WorldPosition ToWorld(Vector3 local) => frame.ToWorld(local);
+        internal void SetHorizonView(Camera view) => horizonView = view;
         public Vector3 ToLocal(WorldPosition point) => frame.ToLocal(point);
         internal WorldPosition PlaceInRegion(System.Numerics.Vector2 point, double height) => field.Surface.Place(point, height);
         public float SurfaceHeight(WorldPosition point) => field.HeightAt(point.X, point.Z);
@@ -218,8 +261,9 @@ namespace Reol2.World
         {
             if (ViewDistanceOverride > 0f)
                 return ViewDistanceOverride;
-            float original = Mathf.Lerp(13500f, 100000f, Mathf.Clamp01((float)elevation / 32768f));
-            return Landforms == null ? original : Mathf.Max(original, Mathf.Min(60000f, 13500f + (float)elevation * 4.56f));
+            float height = Mathf.Max(0f, (float)elevation);
+            float range = Mathf.Lerp(20000f, 150000f, Mathf.Clamp01(height / WorldDefinition.MaxY));
+            return Landforms == null ? range : Mathf.Max(range, Mathf.Min(90000f, 20000f + height * 6f));
         }
 
         internal bool NeedsShift(Vector3 local) => largeWorld && frame.NeedsShift(local);
@@ -294,10 +338,12 @@ namespace Reol2.World
         {
             probe?.BeginStep();
             long start = Stopwatch.GetTimestamp();
-            Vector3 prediction = Vector3.ClampMagnitude(intendedVelocity * 0.68f, 44f);
+            float range = largeWorld ? 64f : 44f;
+            Vector3 prediction = Vector3.ClampMagnitude(intendedVelocity * 0.68f, range);
             float verticalLead = Mathf.Abs(prediction.y);
-            if (verticalLead > 14f)
-                prediction *= 14f / verticalLead;
+            float verticalRange = largeWorld ? 28f : 14f;
+            if (verticalLead > verticalRange)
+                prediction *= verticalRange / verticalLead;
             Vector3 endpoint = ClampToWorld(position + prediction);
             var path = new ContinentTravelPath(position, endpoint - position, frame.PageOrigin);
             Vector3Int nextCenter = LocalChunk(position);
@@ -475,6 +521,8 @@ namespace Reol2.World
 
         public bool TryEdit(Vector3Int cell, bool fill, CharacterController occupant = null)
         {
+            if (terrainSave?.CanEdit == false)
+                return false;
             if (fill && occupant != null
                 && occupant.bounds.Intersects(new Bounds((Vector3)(cell - frame.Origin) + Vector3.one * 0.5f, Vector3.one * 2f)))
                 return false;
@@ -486,6 +534,8 @@ namespace Reol2.World
 
         public bool TryEditSphere(WorldPosition centerPoint, bool fill, CharacterController occupant = null)
         {
+            if (terrainSave?.CanEdit == false)
+                return false;
             float clearance = ContinentField.BrushRadius + ContinentField.Spacing * 0.5f;
             if (fill && occupant != null && occupant.bounds.SqrDistance(frame.ToLocal(centerPoint)) < clearance * clearance)
                 return false;
@@ -497,6 +547,8 @@ namespace Reol2.World
 
         public bool TryGrade(WorldPosition start, WorldPosition end, CharacterController occupant = null)
         {
+            if (terrainSave?.CanEdit == false)
+                return false;
             if (occupant != null)
             {
                 Vector3 first = frame.ToLocal(start), last = frame.ToLocal(end);
@@ -700,12 +752,18 @@ namespace Reol2.World
             UpdateCoverage(LocalChunk(local));
             WorldPosition world = frame.ToWorld(local);
             double budget = entry ? 3 : Math.Max(0, 2.85 - Milliseconds(started));
-            if (world.Y < field.HeightAt(world.X, world.Z) + 40f)
-                caveHorizon.Stream(world, frame, budget);
-            else
-                caveHorizon.Deactivate();
+            caveHorizon.Stream(world, frame, budget);
             budget = entry ? 3 : Math.Max(0, 2.85 - Milliseconds(started));
-            worldHorizon.Stream(world, frame, entry, budget, HorizonDistance(world.Y));
+            WorldPosition eye = world;
+            float pixelScale = WorldHorizon.PixelScale(Screen.height, 64f);
+            if (horizonView != null)
+            {
+                pixelScale = WorldHorizon.PixelScale(horizonView.pixelHeight, horizonView.fieldOfView);
+                // The camera has not caught up on the frame that rebases or teleports the player.
+                if (!entry && (horizonView.transform.position - local).sqrMagnitude < 32f * 32f)
+                    eye = frame.ToWorld(horizonView.transform.position);
+            }
+            worldHorizon.Stream(world, eye, frame, entry, budget, HorizonDistance(world.Y), pixelScale);
         }
 
         private void UpdateCoverage(Vector3Int focus)
@@ -753,6 +811,11 @@ namespace Reol2.World
 
         private void OnDestroy()
         {
+            if (terrainSave != null)
+            {
+                Application.wantsToQuit -= terrainSave.TrySaveBeforeQuit;
+                terrainSave.Dispose();
+            }
             Shader.SetGlobalVector(GroundOrigin, Vector4.zero);
             foreach (ResidentPage page in ready.Values)
                 page.View?.Release();

@@ -44,17 +44,17 @@ namespace Reol2.World
 
         private CavePart[] Primary { get; }
 
-        internal void Collect(Vector3Int first, Vector3Int last, List<CavePart> result)
+        internal void Collect(Vector3Int first, Vector3Int last, List<CavePart> result, bool wholeSystems = false)
         {
             result.Clear();
-            if (last.y < -63000)
-                CollectParts(deepCave, first, last, result);
+            if (first.y < -63000)
+                CollectParts(deepCave, first, last, result, wholeSystems);
             if (last.y < WorldSurface.DeepestSeabed * 2 - 1200 || first.y > WorldSurface.HighestTerrain * 2 + 150)
                 return;
 
             if (first.x <= (Chamber.X + ReachFromRegionCenter) * 2 && last.x >= (Chamber.X - ReachFromRegionCenter) * 2
                 && first.z <= (Chamber.Z + ReachFromRegionCenter) * 2 && last.z >= (Chamber.Z - ReachFromRegionCenter) * 2)
-                CollectParts(Primary, first, last, result);
+                CollectParts(Primary, first, last, result, wholeSystems);
 
             // Other cave systems stay inside their owning region's margin. This also bounds cold lookup.
             for (int rz = first.z >> 16; rz <= (last.z >> 16); rz++)
@@ -64,15 +64,23 @@ namespace Reol2.World
                 int cz = rz * RegionSize + RegionSize / 2;
                 if (first.x <= (cx + ReachFromRegionCenter) * 2 && last.x >= (cx - ReachFromRegionCenter) * 2
                     && first.z <= (cz + ReachFromRegionCenter) * 2 && last.z >= (cz - ReachFromRegionCenter) * 2)
-                    CollectParts(Region(rx, rz, cx, cz), first, last, result);
+                    CollectParts(Region(rx, rz, cx, cz), first, last, result, wholeSystems);
             }
         }
 
-        private static void CollectParts(CavePart[] parts, Vector3Int first, Vector3Int last, List<CavePart> result)
+        private static void CollectParts(CavePart[] parts, Vector3Int first, Vector3Int last, List<CavePart> result, bool wholeSystem)
         {
             foreach (CavePart part in parts)
-                if (part.Intersects(first, last))
-                    result.Add(part);
+            {
+                if (!part.Intersects(first, last))
+                    continue;
+                if (wholeSystem)
+                {
+                    result.AddRange(parts);
+                    return;
+                }
+                result.Add(part);
+            }
         }
 
         private CavePart[] Region(int rx, int rz, int centerX, int centerZ)
@@ -127,9 +135,9 @@ namespace Reol2.World
             return new[]
             {
                 new CavePart(chamber, new Vector3(604f, 132f, 294f)),
-                new CavePart(westMouth, westBend, 28f),
+                new CavePart(westMouth, westBend, 28f, entrance: true),
                 new CavePart(westBend, westInside, 32f),
-                new CavePart(eastMouth, eastBend, 29f),
+                new CavePart(eastMouth, eastBend, 29f, entrance: true),
                 new CavePart(eastBend, eastInside, 38f),
                 new CavePart(new WorldPosition(x + 162, level, z + 186), new WorldPosition(x + 260, level - 74, z + 430), 17f)
             };
@@ -151,12 +159,15 @@ namespace Reol2.World
     internal readonly struct CavePart
     {
         internal const float BlendDistance = 10f;
+        internal const float JunctionBlend = 6f;
         private readonly WorldPosition origin;
         private readonly Vector3 radii;
         private readonly Vector3 axis;
         private readonly float radius;
         private readonly float reciprocalLengthSquared;
         private readonly BoundsInt samples;
+        internal bool IsEntrance { get; }
+        internal Vector3Int EntranceSample => origin.Cell * 2 + Vector3Int.RoundToInt(axis.normalized * 64f);
 
         internal CavePart(WorldPosition center, Vector3 radii)
         {
@@ -166,9 +177,10 @@ namespace Reol2.World
             radius = Mathf.Min(radii.x, Mathf.Min(radii.y, radii.z));
             reciprocalLengthSquared = 0f;
             samples = SampleBounds(origin, -radii, radii);
+            IsEntrance = false;
         }
 
-        internal CavePart(WorldPosition from, WorldPosition to, float radius)
+        internal CavePart(WorldPosition from, WorldPosition to, float radius, bool entrance = false)
         {
             origin = from;
             radii = Vector3.zero;
@@ -177,6 +189,7 @@ namespace Reol2.World
             this.radius = radius;
             Vector3 padding = Vector3.one * radius;
             samples = SampleBounds(origin, Vector3.Min(Vector3.zero, axis) - padding, Vector3.Max(Vector3.zero, axis) + padding);
+            IsEntrance = entrance;
         }
 
         internal bool Intersects(Vector3Int first, Vector3Int last) => first.x < samples.xMax && last.x >= samples.xMin
@@ -245,11 +258,19 @@ namespace Reol2.World
 
         private static float CarveAtDistance(float distance, float density)
         {
-            if (distance >= BlendDistance || -distance <= density)
-                return density;
-            if (distance <= 0f)
-                return -distance;
-            return Mathf.Lerp(density, -distance, 1f - WorldNoise.Ramp(distance / BlendDistance));
+            float cavity = -distance;
+            float carved = density;
+            if (cavity > density && distance < BlendDistance)
+                carved = distance <= 0f ? cavity : Mathf.Lerp(density, cavity, 1f - WorldNoise.Ramp(distance / BlendDistance));
+
+            // Smooth the union of the outdoor air and the tunnel in the band around the mouth.
+            // Resolve the rounded lip in both the render mesh and its collider.
+            float band = Mathf.Max(Mathf.Abs(distance), Mathf.Abs(density));
+            if (band >= JunctionBlend)
+                return carved;
+            float overlap = Mathf.Max(0f, JunctionBlend - Mathf.Abs(density - cavity));
+            float weight = 1f - WorldNoise.Ramp((band - JunctionBlend * 0.5f) / (JunctionBlend * 0.5f));
+            return Mathf.Lerp(carved, Mathf.Max(density, cavity) + overlap * overlap * (0.25f / JunctionBlend), weight);
         }
 
         private Vector3 Offset(Vector3Int sample) => new((float)(sample.x * 0.5 - origin.X),

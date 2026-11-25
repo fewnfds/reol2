@@ -58,6 +58,12 @@ namespace Reol2.World
                 if (terrain.IsLargeWorld)
                 {
                     string[] args = Environment.GetCommandLineArgs();
+                    int persistence = Array.IndexOf(args, "-world-persistence-check");
+                    if (persistence >= 0)
+                    {
+                        yield return CheckTerrainPersistence(persistence + 1 < args.Length ? args[persistence + 1] : null);
+                        yield break;
+                    }
                     int captureBake = Array.IndexOf(args, "-world-capture-surface-bake");
                     if (captureBake >= 0)
                     {
@@ -163,6 +169,11 @@ namespace Reol2.World
                         yield return CaptureSeamRoute(target);
                         yield break;
                     }
+                    if (Array.IndexOf(args, "-world-terrain-lod-check") >= 0)
+                    {
+                        yield return CheckTerrainLod(target);
+                        yield break;
+                    }
                     yield return MeasureLargeWorld(target);
                     yield break;
                 }
@@ -212,9 +223,7 @@ namespace Reol2.World
             }
             finally
             {
-                target.Release();
                 Destroy(target);
-                view.enabled = true;
             }
         }
 
@@ -290,7 +299,7 @@ namespace Reol2.World
         {
             // Drive the same frame handler as the normal player and render the resulting movement.
             player.ProcessInput(default, Step, focused: true);
-            player.ProcessInput(new ExplorerInput { Destination = Key.F1 }, Step, focused: true);
+            PressDestination(Key.F1);
             if (!Check(player.MoveMode == ExplorerMoveMode.Swim, "controls sea arrival"))
                 yield break;
             player.ProcessInput(default, Step, focused: true);
@@ -470,7 +479,41 @@ namespace Reol2.World
                 yield break;
             player.Look(90f, 23f);
             yield return WarmWorld(180);
+            LogCaveView("west arrival");
             CaptureIfRequested(target, "mouth");
+
+            foreach (bool west in new[] { true, false })
+            {
+                string side = west ? "west" : "east";
+                int entrance = west ? 1 : path.Count - 2;
+                PressDestination(west ? Key.F2 : Key.F3);
+                if (!Check(player.MoveMode == ExplorerMoveMode.Flight
+                    && Vector3.Distance(player.transform.position, terrain.ToLocal(path[entrance])) < 150f, $"{side} cave shortcut"))
+                    yield break;
+                yield return WarmWorld(120);
+                LogCaveView($"{side} outside along passage");
+                CaptureIfRequested(target, $"{side}-axis-in");
+                float openingDistance = Vector3.Distance(view.transform.position, terrain.ToLocal(path[entrance]));
+                if (!Check(terrain.CaveTiles > 0 && CaveRayShowsBackground(target, openingDistance + 24f),
+                    $"{side} entrance is visible from outside"))
+                    yield break;
+
+                Vector3 exit = terrain.ToLocal(path[entrance]);
+                Vector3 inward = (terrain.ToLocal(path[entrance + (west ? 1 : -1)]) - exit).normalized;
+                if (!Check(player.EnterAt(terrain.ToWorld(exit + inward * 90f)), $"{side} inside arrival"))
+                    yield break;
+                Vector3 angles = Quaternion.LookRotation(-inward).eulerAngles;
+                player.Look(angles.y, Mathf.DeltaAngle(0f, angles.x));
+                yield return WarmWorld(120);
+                LogCaveView($"{side} inside looking out");
+                CaptureIfRequested(target, $"{side}-axis-out");
+                if (!Check(terrain.IsUnderground(view.transform.position) && view.clearFlags == CameraClearFlags.Skybox
+                    && Mathf.Abs(view.farClipPlane - terrain.HorizonDistance(player.WorldFeet.Y) * 1.07f) < 0.1f
+                    && CaveRayShowsBackground(target, 155f), $"{side} exit shows the outdoor view"))
+                    yield break;
+            }
+            if (!Check(player.EnterAt(path[0]), "seam route west return"))
+                yield break;
 
             // Inspect the lip while moving through almost coplanar views.
             for (int i = 0; i < 48; i++)
@@ -482,7 +525,8 @@ namespace Reol2.World
                 yield return null;
             }
 
-            for (int i = 1; i <= 3; i++)
+            int limits = player.LimitedMoves;
+            for (int i = 1; i < path.Count; i++)
             {
                 for (int step = 0; step < 600; step++)
                 {
@@ -504,6 +548,8 @@ namespace Reol2.World
                 yield return WarmWorld(150);
                 CaptureIfRequested(target, $"passage-{i}");
             }
+            if (!Check(player.LimitedMoves == limits, "seam route collision coverage"))
+                yield break;
 
             WorldPosition bend = path[2];
             WorldPosition join = path[3];
@@ -523,7 +569,201 @@ namespace Reol2.World
                 yield return null;
             }
             CaptureIfRequested(target, "tunnel-after-16m");
+            foreach (float tilt in new[] { -6f, 0f, 10f })
+            {
+                player.Look(86f, tilt);
+                if (!Check(!CaveRayShowsBackground(target, view.farClipPlane), $"main chamber wall occludes the view at {tilt} degrees"))
+                    yield break;
+            }
+            PressDestination(Key.F4);
+            if (!Check(Math.Abs(player.WorldFeet.Y - terrain.DeepChamber.Y) < 0.02d, "deep cave shortcut"))
+                yield break;
+            yield return WarmWorld(120);
+            for (int heading = 0; heading < 360; heading += 90)
+            {
+                player.Look(heading, 15f);
+                Render();
+                if (heading == 0)
+                    CaptureIfRequested(target, "deep-cave");
+                if (!Check(!CaveRayShowsBackground(target, view.farClipPlane), $"deep cave rock occludes the view at {heading} degrees"))
+                    yield break;
+            }
+            // Wait for the last offscreen frame before disposing the render target.
+            AsyncGPUReadbackRequest lastFrame = AsyncGPUReadback.Request(target, 0);
+            while (!lastFrame.done)
+                yield return null;
+            if (!Check(!lastFrame.hasError, "seam route final frame readback"))
+                yield break;
+            Debug.Log("World cave seams | both entrances render in both directions, passage is traversable, deep cave remains enclosed");
             Application.Quit(0);
+        }
+
+        private bool CaveRayShowsBackground(RenderTexture target, float distance)
+        {
+            var pixel = new Texture2D(1, 1, TextureFormat.RGB24, false);
+            RenderTexture previous = RenderTexture.active;
+            CameraClearFlags clear = view.clearFlags;
+            Color background = view.backgroundColor;
+            float far = view.farClipPlane;
+            try
+            {
+                view.clearFlags = CameraClearFlags.SolidColor;
+                view.farClipPlane = distance;
+                Color dark = ReadCenter(Color.black);
+                Color light = ReadCenter(Color.white);
+                return light.grayscale - dark.grayscale > 0.2f;
+            }
+            finally
+            {
+                view.clearFlags = clear;
+                view.backgroundColor = background;
+                view.farClipPlane = far;
+                RenderTexture.active = previous;
+                Destroy(pixel);
+            }
+
+            Color ReadCenter(Color color)
+            {
+                view.backgroundColor = color;
+                Render();
+                RenderTexture.active = target;
+                pixel.ReadPixels(new Rect(target.width / 2, target.height / 2, 1, 1), 0, 0, false);
+                return pixel.GetPixel(0, 0);
+            }
+        }
+
+        private void LogCaveView(string name)
+        {
+            WorldPosition feet = player.WorldFeet, eye = terrain.ToWorld(view.transform.position);
+            bool hit = Physics.Raycast(view.transform.position, view.transform.forward, out RaycastHit contact,
+                160f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            Debug.Log(FormattableString.Invariant($"Cave view | {name} | feet {feet.X:F2} {feet.Y:F2} {feet.Z:F2} | ground {terrain.SurfaceHeight(feet):F2} | eye {eye.X:F2} {eye.Y:F2} {eye.Z:F2} | eye ground {terrain.SurfaceHeight(eye):F2} | tiles {terrain.CaveTiles} | far {view.farClipPlane:F0} | first collision {(hit ? contact.distance : -1f):F2}"));
+        }
+
+        private IEnumerator CheckTerrainLod(RenderTexture target)
+        {
+            if (!Check(terrain.Landforms?.Size == 64000 && terrain.Seed == 20261121, "terrain LOD fixture"))
+                yield break;
+
+            player.Environment.Clock.Paused = true;
+            player.Environment.PreviewWeather = new WeatherSample(0.12f, 0, 0, 0, 0);
+            var feet = new WorldPosition(6424, 2892.3, -23059);
+            var from = new WorldPosition(6425.552, 2897.187, -23051.972);
+            if (!Check(player.EnterFlight(feet, 195f, 26f), "terrain LOD cave arrival"))
+                yield break;
+            for (int i = 0; i < 850 && terrain.CaveEntranceProgress.Pending != 0; i++)
+            {
+                terrain.Stream(player.transform.position, Vector3.zero);
+                yield return null;
+            }
+            var entrance = terrain.CaveEntranceProgress;
+            Debug.Log($"Terrain LOD | entrance samples ready {entrance.Ready}, pending {entrance.Pending}");
+            if (!Check(entrance.Ready > 0 && entrance.Pending == 0, "terrain LOD cave entrance coverage"))
+                yield break;
+            view.transform.SetPositionAndRotation(terrain.ToLocal(from), Quaternion.Euler(26f, 195f, 0f));
+            Render();
+            CaptureIfRequested(target, "cave-near");
+            bool[] near = ReadCaveSilhouette(target);
+            // Shift the streaming focus while preserving the camera projection and scene lighting.
+            Vector3 remote = player.transform.position + new Vector3(0f, 0f, -104f);
+            for (int i = 0; i < 300; i++)
+                terrain.Stream(remote, Vector3.zero);
+            Render();
+            CaptureIfRequested(target, "cave-far");
+            bool[] far = ReadCaveSilhouette(target);
+            int changed = 0, rock = 0;
+            for (int i = 0; i < near.Length; i++)
+            {
+                if (near[i] || far[i])
+                    rock++;
+                if (near[i] != far[i])
+                    changed++;
+            }
+            Debug.Log(FormattableString.Invariant($"Terrain LOD | cave changed silhouette samples {changed}/{rock}"));
+            if (!Check(rock > 500 && rock < near.Length - 200 && changed < rock * 0.1f, "terrain LOD stable cave silhouette"))
+                yield break;
+
+            var passage = terrain.CavePassage;
+            Vector3 mouth = terrain.ToLocal(passage[passage.Count - 2]);
+            Vector3 inner = terrain.ToLocal(passage[passage.Count - 3]);
+            WorldPosition caveFloorApproach = terrain.ToWorld(mouth + (inner - mouth).normalized * 110f);
+            if (!Check(player.EnterFlight(caveFloorApproach, 270f, 34f), "terrain LOD cave floor approach"))
+                yield break;
+            int limits = player.LimitedMoves;
+            for (int i = 0; i < 160 && !player.Grounded; i++)
+            {
+                player.MoveForFrame(Vector2.zero, 0f, false, false, Step);
+                yield return null;
+            }
+            if (!Check(player.Grounded && player.LimitedMoves == limits && VisibleMeshSupportsPlayer(),
+                "terrain LOD player landed on the visible cave floor"))
+                yield break;
+            Debug.Log("Terrain LOD | cave floor landing used the displayed mesh and kept collision coverage");
+            player.UpdateView();
+            Render();
+            CaptureIfRequested(target, "cave-landing");
+
+            var summit = new WorldPosition(feet.X + 840, terrain.SurfaceHeight(feet) + 1100, feet.Z + 420);
+            if (!Check(player.EnterFlight(summit, 245f, 35f), "terrain LOD mountain survey"))
+                yield break;
+            yield return WarmWorld(520);
+            var edges = terrain.MeasureDryHorizonEdges();
+            Debug.Log(FormattableString.Invariant($"Terrain LOD | dry seams {edges.Edges} | maximum unstitched error {edges.OriginalError:F3} m | rendered mismatch {edges.Error:F4} m"));
+            var errors = terrain.ProjectedHorizonErrors();
+            Debug.Log(FormattableString.Invariant($"Terrain LOD | {target.height} px | {errors.Leaves} visible tiles, {errors.WithError} measured, {errors.AboveThreshold} above 1.5 px, peak {errors.MaximumPixels:F2} px | pending {terrain.PendingHorizonTiles} | built {terrain.RegularHorizonBuilds} regular, {terrain.RegionalHorizonBuilds.Tiles} regional | visited {terrain.RegionalHorizonBuilds.Cells} regional cells, longest {terrain.RegionalHorizonBuilds.Longest} build frames"));
+            CaptureIfRequested(target, "mountain");
+            if (!Check(edges.Edges > 0 && edges.OriginalError > 0.1f && edges.Error < 0.01f, "terrain LOD matched dry edges"))
+                yield break;
+            Application.Quit(0);
+        }
+
+        private bool VisibleMeshSupportsPlayer()
+        {
+            Vector3 start = player.transform.position + Vector3.up * 0.35f;
+            return Physics.Raycast(start, Vector3.down, out RaycastHit hit, 0.7f, Physics.DefaultRaycastLayers,
+                    QueryTriggerInteraction.Ignore)
+                && hit.collider is MeshCollider collider
+                && collider.TryGetComponent(out MeshFilter filter) && collider.sharedMesh == filter.sharedMesh
+                && collider.TryGetComponent(out MeshRenderer renderer) && renderer.enabled;
+        }
+
+        private bool[] ReadCaveSilhouette(RenderTexture target)
+        {
+            const int size = 128;
+            var reduced = RenderTexture.GetTemporary(size, size);
+            var pixels = new Texture2D(size, size, TextureFormat.RGB24, false);
+            RenderTexture previous = RenderTexture.active;
+            CameraClearFlags clear = view.clearFlags;
+            Color background = view.backgroundColor;
+            float far = view.farClipPlane;
+            try
+            {
+                view.clearFlags = CameraClearFlags.SolidColor;
+                view.backgroundColor = Color.magenta;
+                view.farClipPlane = 12f;
+                Render();
+                Graphics.Blit(target, reduced);
+                RenderTexture.active = reduced;
+                pixels.ReadPixels(new Rect(0, 0, size, size), 0, 0, false);
+                Color32[] colors = pixels.GetPixels32();
+                var mask = new bool[size * size / 2];
+                for (int y = 0; y < size; y++)
+                for (int x = size / 2; x < size; x++)
+                {
+                    Color32 pixel = colors[y * size + x];
+                    mask[y * (size / 2) + x - size / 2] = pixel.r < 155 || pixel.b < 155 || pixel.g > 55;
+                }
+                return mask;
+            }
+            finally
+            {
+                view.clearFlags = clear;
+                view.backgroundColor = background;
+                view.farClipPlane = far;
+                RenderTexture.active = previous;
+                RenderTexture.ReleaseTemporary(reduced);
+                Destroy(pixels);
+            }
         }
 
         private IEnumerator MeasureLargeWorld(RenderTexture target)
@@ -765,6 +1005,13 @@ namespace Reol2.World
             yield return WarmWorld(120);
             Debug.Log(FormattableString.Invariant($"World benchmark | surface route | allocated settled/after departure {settled / 1048576d:F1}/{Profiler.GetTotalAllocatedMemoryLong() / 1048576d:F1} MiB | active pages {terrain.ActivePages}"));
             longRoutePassed = true;
+        }
+
+        private void PressDestination(Key key)
+        {
+            // Hidden Player windows can lose focus. Feed the idle frame that normally restores input.
+            player.ProcessInput(default, 0f, focused: true);
+            player.ProcessInput(new ExplorerInput { Destination = key }, Step, focused: true);
         }
 
         private IEnumerator WarmWorld(int steps)

@@ -82,7 +82,8 @@ namespace Reol2.World
 
         private void Start()
         {
-            EnterAt(terrain.WorldLanding);
+            terrain.SetHorizonView(view);
+            EnterStartingPoint();
             if (terrain.IsTerrainDemo)
                 Look(186f, 29f);
             else if (terrain.Landforms is RegionalLandforms region)
@@ -94,6 +95,20 @@ namespace Reol2.World
 #endif
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
+        }
+
+        private void EnterStartingPoint()
+        {
+            WorldPosition home = terrain.WorldLanding;
+            if (EnterAt(home) || !terrain.IsLargeWorld || TryReturnHome())
+                return;
+
+            for (int lift = 16; lift <= WorldDefinition.MaxY; lift *= 2)
+            {
+                double height = System.Math.Min(home.Y + lift, WorldDefinition.MaxY - 3d);
+                if (EnterFlight(new WorldPosition(home.X, height, home.Z), 0f, 25f))
+                    return;
+            }
         }
 
         private void OnDisable() => mouseControl.Release(wait: true);
@@ -109,8 +124,14 @@ namespace Reol2.World
             }
         }
 
-        private void Update() => ProcessInput(ExplorerInput.Read(Keyboard.current, Mouse.current),
-            Mathf.Min(Time.deltaTime, 0.05f), Application.isFocused);
+        private void Update()
+        {
+            Keyboard keyboard = Keyboard.current;
+            bool focused = Application.isFocused;
+            if (focused && keyboard?.f9Key.wasPressedThisFrame == true && terrain.TryQuitWithoutTerrainSave())
+                return;
+            ProcessInput(ExplorerInput.Read(keyboard, Mouse.current), Mathf.Min(Time.deltaTime, 0.05f), focused);
+        }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
         private void LateUpdate()
@@ -240,8 +261,8 @@ namespace Reol2.World
             bool arrived = key == Key.Home ? TryReturnHome() : terrain.IsLargeWorld && (key switch
             {
                 Key.F1 => EnterAt(terrain.OceanEntry),
-                Key.F2 => EnterFlight(terrain.WestCaveEntrance, 90f, 22f),
-                Key.F3 => EnterFlight(terrain.EastCaveEntrance, -90f, 22f),
+                Key.F2 => EnterCave(west: true),
+                Key.F3 => EnterCave(west: false),
                 Key.F4 => EnterFlight(terrain.DeepChamber, 0f, 25f),
                 Key.F5 => EnterFlight(terrain.BasinEntry, 0f, 28f),
                 Key.F6 => EnterAt(terrain.DeepSeaEntry),
@@ -375,6 +396,22 @@ namespace Reol2.World
             MoveMode = ExplorerMoveMode.Flight;
             Look(heading, tilt);
             return true;
+        }
+
+        private bool EnterCave(bool west)
+        {
+            var path = terrain.CavePassage;
+            int entrance = west ? 1 : path.Count - 2;
+            WorldPosition mouth = path[entrance];
+            WorldPosition next = path[entrance + (west ? 1 : -1)];
+            var inward = new Vector3((float)(next.X - mouth.X), (float)(next.Y - mouth.Y), (float)(next.Z - mouth.Z)).normalized;
+            const float approach = 60f;
+            var point = new WorldPosition(mouth.X - inward.x * approach, mouth.Y - inward.y * approach,
+                mouth.Z - inward.z * approach);
+            double altitude = System.Math.Max(point.Y, terrain.SurfaceHeight(point) + 3f);
+            Vector3 sight = inward * approach + Vector3.up * (float)(point.Y - altitude);
+            Vector3 angles = Quaternion.LookRotation(sight).eulerAngles;
+            return EnterFlight(new WorldPosition(point.X, altitude, point.Z), angles.y, Mathf.DeltaAngle(0f, angles.x));
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD || REOL_TEST_BUILD
@@ -710,7 +747,9 @@ namespace Reol2.World
             {
                 fontSize = 16, fontStyle = FontStyle.Bold, normal = { textColor = Color.white }
             };
-            GUI.Box(new Rect(12, 11, 810, terrain.IsLargeWorld ? 132 : 86), GUIContent.none);
+            string saveStatus = terrain.TerrainSaveStatus;
+            int hudHeight = terrain.IsLargeWorld ? (saveStatus == null ? 132 : 155) : 86;
+            GUI.Box(new Rect(12, 11, 810, hudHeight), GUIContent.none);
             GUI.Label(new Rect(23, 16, 785, 24), hud ?? "REOL 2   |   CONTINENT TEST", hudStyle);
             GUI.Label(new Rect(23, 41, 785, 23),
                 "W/S move   A/D turn   Q/E strafe   Shift sprint   Alt walk   C crouch   Space/X rise/dive   F fly");
@@ -726,9 +765,11 @@ namespace Reol2.World
 #endif
                 GUI.Label(new Rect(23, 110, 785, 23), gradeStart.HasValue
                     ? "Grade: aim at the end and press 3   Esc cancel" : "3 mark two points to grade a slope");
+                if (saveStatus != null)
+                    GUI.Label(new Rect(23, 133, 785, 23), saveStatus);
             }
             if (Time.unscaledTime < prospectUntil)
-                GUI.Box(new Rect(12, terrain.IsLargeWorld ? 150 : 128, 650, 28), prospectMessage);
+                GUI.Box(new Rect(12, terrain.IsLargeWorld ? hudHeight + 18 : 128, 650, 28), prospectMessage);
             movementSpeed.DrawHud(Application.isFocused && !choosingDestination && MouseGesture == ExplorerMouseGesture.None);
             if (choosingDestination)
                 DestinationPanel();

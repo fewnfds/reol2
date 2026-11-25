@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using Reol2.Voxels;
 using UnityEngine;
+using EditPages = System.Collections.Generic.Dictionary<UnityEngine.Vector3Int,
+    System.Collections.Generic.Dictionary<UnityEngine.Vector3Int, Reol2.World.ContinentField.SampleEdit>>;
 
 namespace Reol2.World
 {
@@ -26,7 +28,8 @@ namespace Reol2.World
         private readonly float[,] heights;
         private readonly float[] heightSamples = new float[DensityVolume.SampleWidth * DensityVolume.SampleWidth];
         private readonly float[] heightNodes = new float[16];
-        private readonly Dictionary<Vector3Int, Dictionary<Vector3Int, SampleEdit>> editedPages = new();
+        private readonly EditPages editedPages = new();
+        private EditPages editSnapshot;
         private readonly HashSet<Vector3Int> editedChunks = new();
         private readonly HashSet<Vector3Int> highEditRegions = new();
         private readonly EditSampleCache[] recentEditSamples = new EditSampleCache[16];
@@ -45,6 +48,7 @@ namespace Reol2.World
         internal WorldPosition SeaEntry { get; }
         internal WorldCaves Caves { get; }
         internal int EditedSamples { get; private set; }
+        internal long EditRevision { get; private set; }
         internal long EvaluatedDensitySamples { get; private set; }
         internal bool HasEdits(Vector3Int page) => editedChunks.Contains(page);
         internal IReadOnlyCollection<Vector3Int> GradeChangedChunks => gradeChangedChunks;
@@ -265,7 +269,7 @@ namespace Reol2.World
                 Vector2 distance = caveParts[i].DistanceRange(minimumSample, maximumSample);
                 if (!naturalSnapshot && !hasEdits && distance.y < -0.001f)
                     return PageContent.Air;
-                canCarveAir |= distance.x < 0.001f;
+                canCarveAir |= distance.x < CavePart.JunctionBlend;
             }
 
             bool heightOnly = !hasEdits && caveParts.Count == 0;
@@ -355,9 +359,8 @@ namespace Reol2.World
             return ClassifyBuffer(target);
         }
 
-        internal PageContent CopyCaveProxy(Vector3Int key, float[] target)
+        internal PageContent CopyCaveProxy(Vector3Int key, float[] target, int factor = WorldCaveHorizon.SampleScale)
         {
-            const int factor = WorldCaveHorizon.SampleScale;
             const int width = DensityVolume.SampleWidth;
             Vector3Int first = key * (CellCount * factor) - Vector3Int.one * factor;
             Vector3Int last = first + Vector3Int.one * ((width - 1) * factor);
@@ -368,24 +371,58 @@ namespace Reol2.World
                 Vector2 distance = cavePart.DistanceRange(first, last);
                 if (distance.y < -0.001f)
                     return PageContent.Air;
-                hasWall |= distance.x < 0.001f;
+                hasWall |= distance.x < CavePart.JunctionBlend;
             }
-            if (!hasWall)
+            if (!hasWall && factor == WorldCaveHorizon.SampleScale)
                 return PageContent.Solid;
 
             for (int z = 0; z < width; z++)
             for (int x = 0; x < width; x++)
-                heightSamples[x + z * width] = surface.Node((first.x + x * factor) / 2, (first.z + z * factor) / 2);
+            {
+                int sx = first.x + x * factor, sz = first.z + z * factor;
+                heightSamples[x + z * width] = factor == WorldCaveHorizon.SampleScale
+                    ? surface.Node(sx / 2, sz / 2) : surface.HeightAt(sx * 0.5, sz * 0.5);
+            }
 
             FillWorldDensities(first, factor, target);
             return ClassifyBuffer(target);
         }
 
-        internal float CaveProxyHeight(Vector3 local)
+        internal bool CavePageMayHaveSurface(Vector3Int key, int pageWidth)
+        {
+            Vector3Int origin = key * pageWidth;
+            float low = float.PositiveInfinity, high = float.NegativeInfinity;
+            for (int z = 0; z <= pageWidth; z += ChunkSize)
+            for (int x = 0; x <= pageWidth; x += ChunkSize)
+            {
+                float ground = surface.Node(origin.x + x, origin.z + z);
+                low = Math.Min(low, ground);
+                high = Math.Max(high, ground);
+            }
+            if (origin.y > high)
+                return false;
+            if (origin.y + pageWidth >= low)
+                return true;
+
+            Vector3Int first = origin * DensityVolume.SamplesPerMeter;
+            Vector3Int last = first + Vector3Int.one * (pageWidth * DensityVolume.SamplesPerMeter);
+            Caves.Collect(first, last, caveParts);
+            bool wall = false;
+            foreach (CavePart part in caveParts)
+            {
+                Vector2 distance = part.DistanceRange(first, last);
+                if (distance.y < 0f)
+                    return false;
+                wall |= distance.x < CavePart.JunctionBlend;
+            }
+            return wall;
+        }
+
+        internal float CaveProxyHeight(Vector3 local, float spacing = Spacing)
         {
             const int row = DensityVolume.SampleWidth;
-            float x = local.x / Spacing;
-            float z = local.z / Spacing;
+            float x = local.x / spacing;
+            float z = local.z / spacing;
             int ix = Math.Min((int)x, CellCount - 1);
             int iz = Math.Min((int)z, CellCount - 1);
             int corner = ix + 1 + (iz + 1) * row;
@@ -442,9 +479,10 @@ namespace Reol2.World
                 }
 
                 // A cave enclosing the whole page contributes at least airThroughout everywhere.
-                // A second part cannot raise a sample beyond the greater of its original height density and -distance.
+                // Allow the next part to contribute within the rounding band of that bound.
                 const float distanceSlack = 0.02f;
-                float influenceLimit = (airThroughout > distanceSlack ? -airThroughout : CavePart.BlendDistance) + distanceSlack;
+                float influenceLimit = (airThroughout > distanceSlack ? CavePart.JunctionBlend - airThroughout
+                    : CavePart.BlendDistance) + distanceSlack;
                 for (int i = 0; i < caveParts.Count; i++)
                     if (nearest[i] <= influenceLimit)
                         caveParts[i].Apply(origin, stride, width, heightSamples, target);
@@ -785,8 +823,7 @@ namespace Reol2.World
             Vector3Int? source = next >= 0f ? null : added ? placementCell : current.Source;
             bool sculptedFill = next < 0f && (added ? !placementCell.HasValue : current.SculptedFill);
             WriteEdit(sample, new SampleEdit(next, source, sculptedFill));
-            if (sample.y * Spacing >= WorldSurface.HighestTerrain)
-                highEditRegions.Add(new Vector3Int(sample.x >> 8, sample.y >> 8, sample.z >> 8));
+            TrackHighEdit(sample);
             low = Vector3Int.Min(low, sample);
             high = Vector3Int.Max(high, sample);
         }
@@ -941,10 +978,47 @@ namespace Reol2.World
                 page = new Dictionary<Vector3Int, SampleEdit>(32);
                 editedPages.Add(key, page);
             }
+            else if (editSnapshot != null && editSnapshot.TryGetValue(key, out var saved) && ReferenceEquals(page, saved))
+            {
+                page = new Dictionary<Vector3Int, SampleEdit>(page);
+                editedPages[key] = page;
+            }
             if (page.TryAdd(sample, edit))
                 EditedSamples++;
             else
                 page[sample] = edit;
+            EditRevision++;
+        }
+
+        // The writer owns a shallow copy until it finishes. An edit copies a shared page on its first write.
+        internal EditPages CaptureEditSnapshot() => editSnapshot = new EditPages(editedPages);
+
+        internal void ReleaseEditSnapshot() => editSnapshot = null;
+
+        internal void RestoreEditedPages(EditPages pages)
+        {
+            foreach (var entry in pages)
+            {
+                editedPages.Add(entry.Key, entry.Value);
+                EditedSamples += entry.Value.Count;
+                var low = new Vector3Int(int.MaxValue, int.MaxValue, int.MaxValue);
+                var high = new Vector3Int(int.MinValue, int.MinValue, int.MinValue);
+                foreach (Vector3Int sample in entry.Value.Keys)
+                {
+                    low = Vector3Int.Min(low, sample);
+                    high = Vector3Int.Max(high, sample);
+                    TrackHighEdit(sample);
+                }
+                var bounds = new BoundsInt(low, high - low + Vector3Int.one);
+                foreach (Vector3Int chunk in AffectedChunks(bounds).allPositionsWithin)
+                    editedChunks.Add(chunk);
+            }
+        }
+
+        private void TrackHighEdit(Vector3Int sample)
+        {
+            if (sample.y * Spacing >= WorldSurface.HighestTerrain)
+                highEditRegions.Add(new Vector3Int(sample.x >> 8, sample.y >> 8, sample.z >> 8));
         }
 
         private float BaseDensity(Vector3 point, float surface, bool hasCave)
@@ -979,7 +1053,7 @@ namespace Reol2.World
             return Mathf.Min(140f, island * 31f + rise * (12f + 150f * ridges));
         }
 
-        private readonly struct SampleEdit
+        internal readonly struct SampleEdit
         {
             internal readonly float Density;
             // A rounded box can protrude into the next logical cell; clicking it targets its source.

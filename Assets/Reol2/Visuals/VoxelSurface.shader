@@ -4,6 +4,8 @@ Shader "Reol2/Voxel Surface"
     {
         _BaseColor("Tint", Color) = (1,1,1,1)
         [HideInInspector] _Cull("Cull", Float) = 2
+        [HideInInspector] _TerrainStencilRef("Terrain stencil reference", Float) = 1
+        [HideInInspector] _TerrainStencilRead("Terrain stencil read mask", Float) = 1
         [HideInInspector] _TerrainStencilWrite("Terrain stencil write mask", Float) = 0
         [HideInInspector] _TerrainStencilCompare("Terrain stencil comparison", Float) = 8
     }
@@ -16,8 +18,8 @@ Shader "Reol2/Voxel Surface"
             Tags { "LightMode"="UniversalForward" }
             Stencil
             {
-                Ref 1
-                ReadMask 1
+                Ref [_TerrainStencilRef]
+                ReadMask [_TerrainStencilRead]
                 WriteMask [_TerrainStencilWrite]
                 Comp [_TerrainStencilCompare]
                 Pass Replace
@@ -44,14 +46,19 @@ Shader "Reol2/Voxel Surface"
                 float4 _ResidentTerrainOrigin;
             #endif
             #if defined(REOL_HEIGHT_PROXY)
+                float4 _CaveEntrances[4];
+                float _CaveEntranceCount;
                 TEXTURE3D(_CaveCoverage);
                 SAMPLER(sampler_CaveCoverage);
-                float4 _CaveCoverageBounds;
+                float3 _CaveCoverageOrigin;
+                float3 _CaveCoverageScale;
             #endif
 
             CBUFFER_START(UnityPerMaterial)
                 half4 _BaseColor;
                 float _Cull;
+                float _TerrainStencilRef;
+                float _TerrainStencilRead;
                 float _TerrainStencilWrite;
                 float _TerrainStencilCompare;
             CBUFFER_END
@@ -102,9 +109,29 @@ Shader "Reol2/Voxel Surface"
                 #endif
                 #if defined(REOL_HEIGHT_PROXY)
                     proxyTop.y += input.heightOffset;
-                    float3 cave = (proxyTop - _CaveCoverageBounds.xyz) * _CaveCoverageBounds.w;
-                    if (_CaveCoverageBounds.w > 0 && all(cave >= 0) && all(cave < 1))
-                        clip(0.5 - SAMPLE_TEXTURE3D_LOD(_CaveCoverage, sampler_CaveCoverage, cave, 0).r);
+                    UNITY_LOOP
+                    for (int i = 0; i < (int)_CaveEntranceCount; i++)
+                    {
+                        float4 entrance = _CaveEntrances[i];
+                        float3 delta = abs(proxyTop - entrance.xyz);
+                        clip(max(delta.x, max(delta.y, delta.z)) - entrance.w);
+                    }
+                    float3 offset = proxyTop - _CaveCoverageOrigin;
+                    float3 cave = offset * _CaveCoverageScale;
+                    if (_CaveCoverageScale.x > 0 && all(cave >= 0) && all(cave < 1))
+                    {
+                        uint mask = (uint)round(255.0 * SAMPLE_TEXTURE3D_LOD(_CaveCoverage, sampler_CaveCoverage, cave, 0).r);
+                        if (mask != 0u)
+                        {
+                            // Keep a coarse sample (8 m) of overlap at any exposed face of a 128 m cave page.
+                            float3 local = frac(offset * (1.0 / 128.0));
+                            const float band = 1.0 / 16.0;
+                            uint faces = (uint)dot(1.0 - step(band, local), float3(1, 2, 4))
+                                | (uint)dot(step(1.0 - band, local), float3(8, 16, 32));
+                            if ((mask & faces) == 0u)
+                                clip(-1.0);
+                        }
+                    }
                 #endif
                 #if defined(REOL_HEIGHT_PROXY) || defined(REOL_CAVE_PROXY)
                     float3 coverage = (proxyTop - _ResidentTerrainOrigin.xyz) * (1.0 / 128.0);

@@ -28,12 +28,16 @@ namespace Reol2.World
         private readonly List<int> waterIndices = new();
         private readonly List<Vector3> water = new();
         private readonly List<Vector2> waterDepths = new();
+        private readonly ushort[] wetBorderSpans = new ushort[4];
         private int west, south, width, normalStep;
         private int elevation;
         private int baseIndex, baseGrid, baseStride, baseDetail;
         private float? sharedWaterLevel;
         internal int CellVisits { get; private set; }
         internal float? SharedWaterLevel => water.Count > 0 ? sharedWaterLevel : null;
+        internal IReadOnlyList<Vector3> Vertices => vertices;
+        internal IReadOnlyList<Vector2> SkirtOffsets => skirtOffsets;
+        internal ushort WetBorderSpans(int edge) => wetBorderSpans[edge];
 
         internal RegionalSurfaceTile(ContinentField field)
         {
@@ -57,6 +61,7 @@ namespace Reol2.World
             triangles.Clear();
             water.Clear();
             waterDepths.Clear();
+            Array.Clear(wetBorderSpans, 0, wetBorderSpans.Length);
 
             west = x;
             south = z;
@@ -261,6 +266,7 @@ namespace Reol2.World
 
         private void Emit(Cell cell)
         {
+            int waterBefore = water.Count;
             int a = Vertex(cell.Southwest), b = Vertex(cell.Northwest);
             int c = Vertex(cell.Northeast), d = Vertex(cell.Southeast);
             edge.Clear();
@@ -281,6 +287,21 @@ namespace Reol2.World
                 int center = Vertex(wetKnot ?? cell.Center);
                 for (int i = 0; i < edge.Count; i++)
                     EmitTriangle(center, edge[i], edge[(i + 1) % edge.Count]);
+            }
+
+            // Water is cut from these triangles. Retain their original border heights.
+            if (water.Count != waterBefore)
+            {
+                ushort x = (ushort)(1 << (cell.X / baseStride));
+                ushort z = (ushort)(1 << (cell.Z / baseStride));
+                if (cell.Z == 0)
+                    wetBorderSpans[0] |= x;
+                if (cell.X == 0)
+                    wetBorderSpans[1] |= z;
+                if (cell.Z + cell.Size == width)
+                    wetBorderSpans[2] |= x;
+                if (cell.X + cell.Size == width)
+                    wetBorderSpans[3] |= z;
             }
 
             float skirt = cell.Size * 1.25f;
@@ -351,11 +372,40 @@ namespace Reol2.World
         private void AppendEdgeKnots(Vector2Int start, Vector2Int end)
         {
             Vector2Int mid = (start + end) / 2;
-            if (mid == start || mid == end || !corners.Contains(mid) && !RiverCrossesEdge(start, end))
+            if (mid == start || mid == end || !ShoreCrossesBorder(start, end)
+                && !corners.Contains(mid) && !RiverCrossesEdge(start, end))
                 return;
             AppendEdgeKnots(start, mid);
             edge.Add(Vertex(mid));
             AppendEdgeKnots(mid, end);
+        }
+
+        private bool ShoreCrossesBorder(Vector2Int start, Vector2Int end)
+        {
+            int length = Math.Abs(start.x - end.x) + Math.Abs(start.y - end.y);
+            if (length <= ContinentField.ChunkSize)
+                return false;
+            int side;
+            int along;
+            if (start.y == end.y && (start.y == 0 || start.y == width))
+            {
+                side = start.y == 0 ? 0 : 2;
+                along = Math.Min(start.x, end.x);
+            }
+            else if (start.x == end.x && (start.x == 0 || start.x == width))
+            {
+                side = start.x == 0 ? 1 : 3;
+                along = Math.Min(start.y, end.y);
+            }
+            else
+                return false;
+
+            // Query the same world edge on both tiles. A one-metre margin covers a bin boundary.
+            int x = west + Math.Min(start.x, end.x), z = south + Math.Min(start.y, end.y);
+            if ((surface.WaterFeaturesIn(x - 1, z - 1, length + 2) & (WaterFeatures.Coast | WaterFeatures.Lake)) == 0)
+                return false;
+            wetBorderSpans[side] |= (ushort)(1 << (along / baseStride));
+            return true;
         }
 
         private bool RiverCrossesEdge(Vector2Int start, Vector2Int end)

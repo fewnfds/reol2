@@ -1,6 +1,6 @@
 # Reol 2 项目文档
 
-Reol 2 是 Windows 单机第三人称 3D 修仙沙盒。当前原型验证连续旅行和可编辑地形。玩家可以飞行、游泳、挖填、两点整形和查看矿迹。[设计方向](design-direction.md)
+Reol 2 是 Windows 单机第三人称 3D 修仙沙盒。当前原型验证连续旅行和可编辑地形。玩家可以飞行、游泳、挖填、两点整形和查看矿迹，Windows 大世界试玩会在重启后恢复地形改动。[设计方向](design-direction.md)
 
 ## 试玩
 
@@ -10,7 +10,7 @@ Reol 2 是 Windows 单机第三人称 3D 修仙沙盒。当前原型验证连续
 
 | 内容 | 文档 |
 | --- | --- |
-| 坐标域、地形采样、近远景、水位、编辑与流送 | [世界引擎](roadmap/world-engine.md) |
+| 坐标域、地形采样、近远景、水位、编辑、流送与存档 | [世界引擎](roadmap/world-engine.md) |
 | 昼夜、天气、地表配色、勘探与角色动画 | [视觉、自然系统与主角](roadmap/world-visual-nature-character.md) |
 | 流送与挖填的独立对照场景 | [两公里大陆](continent-demo.md) · [双块体素 Demo](prototype.md) |
 | Unity 环境、本机构建、测试和 F8 复现包 | [开发与验证](development.md) |
